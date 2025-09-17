@@ -95,27 +95,6 @@ def get_user_repos(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]
     ).fetchall()
 
 
-def ensure_work_item(conn: sqlite3.Connection, kind: str, subject_type: str, subject_id: str) -> bool:
-    """Ensure a work_item exists; return True if inserted (was missing), else False."""
-    row = conn.execute(
-        "SELECT id FROM work_items WHERE kind=? AND subject_type=? AND subject_id=?",
-        (kind, subject_type, subject_id),
-    ).fetchone()
-    if row:
-        print(f"[db] ensure_work_item exists kind={kind} subject={subject_type}:{subject_id}")
-        return False
-    import uuid
-    try:
-        print(f"[db] ensure_work_item insert kind={kind} subject={subject_type}:{subject_id}")
-        conn.execute(
-            "INSERT INTO work_items(id, kind, subject_type, subject_id, status) VALUES(?, ?, ?, ?, 'pending')",
-            (uuid.uuid4().hex, kind, subject_type, subject_id),
-        )
-        print(f"[db] ensure_work_item ok kind={kind} subject={subject_type}:{subject_id}")
-        return True
-    except sqlite3.Error as e:
-        print(f"[db] ensure_work_item error kind={kind} subject={subject_type}:{subject_id} err={e}")
-        raise
 
 
 def set_work_status(
@@ -126,18 +105,27 @@ def set_work_status(
     status: str,
     output_json: str | None = None,
 ) -> None:
-    """Update a work_item status and optionally its output_json/processed_at.
+    """Insert or update a work_item status and optionally its output_json/processed_at.
 
     If status is 'succeeded', processed_at is set to now.
     """
+    import uuid
     processed_at = time.time() if status == "succeeded" else None
     try:
         print(
             f"[db] set_work_status kind={kind} subject={subject_type}:{subject_id} status={status} processed_at={processed_at}"
         )
         conn.execute(
-            "UPDATE work_items SET status=?, output_json=COALESCE(?, output_json), processed_at=COALESCE(?, processed_at) WHERE kind=? AND subject_type=? AND subject_id=?",
-            (status, output_json, processed_at, kind, subject_type, subject_id),
+            """
+            INSERT INTO work_items(id, kind, subject_type, subject_id, status, output_json, processed_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(kind, subject_type, subject_id)
+            DO UPDATE SET 
+                status=excluded.status,
+                output_json=COALESCE(excluded.output_json, output_json),
+                processed_at=COALESCE(excluded.processed_at, processed_at)
+            """,
+            (uuid.uuid4().hex, kind, subject_type, subject_id, status, output_json, processed_at),
         )
         print(f"[db] set_work_status ok kind={kind} subject={subject_type}:{subject_id} status={status}")
     except sqlite3.Error as e:
@@ -153,12 +141,6 @@ def list_user_work_items(conn: sqlite3.Connection, username: str) -> list[sqlite
     ).fetchall()
 
 
-def list_user_pending_failed(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
-    """List user work_items currently in 'pending' or 'failed' states for enqueue healing."""
-    return conn.execute(
-        "SELECT kind, subject_type, subject_id FROM work_items WHERE subject_type='user' AND subject_id=? AND status IN ('pending','failed')",
-        (username,),
-    ).fetchall()
 
 
 def get_work_item(
@@ -171,23 +153,8 @@ def get_work_item(
     ).fetchone()
 
 
-def list_repo_work_items(
-    conn: sqlite3.Connection, subject_id: str
-) -> list[sqlite3.Row]:
-    """List all repo-scoped work_items for a specific repo subject_id ('user/repo')."""
-    return conn.execute(
-        "SELECT kind, status, output_json FROM work_items WHERE subject_type='repo' AND subject_id=?",
-        (subject_id,),
-    ).fetchall()
 
 
-def list_user_repo_pending_failed(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
-    """List repo-scoped work_items in pending/failed for repos owned by username."""
-    like = f"{username}/%"
-    return conn.execute(
-        "SELECT kind, subject_type, subject_id FROM work_items WHERE subject_type='repo' AND subject_id LIKE ? AND status IN ('pending','failed')",
-        (like,),
-    ).fetchall()
 
 
 def reset_user_work_items_to_pending(conn: sqlite3.Connection, username: str, kinds: list[str]) -> None:

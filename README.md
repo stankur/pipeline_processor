@@ -41,10 +41,13 @@ just dev
 
 ## API Usage
 
-### Start pipeline for a user
+### Start pipeline for any user
 
 ```bash
+# Works with any GitHub username
 curl -X POST http://localhost:5000/users/stankur/start
+curl -X POST http://localhost:5000/users/octocat/start
+curl -X POST http://localhost:5000/users/torvalds/start
 ```
 
 ### Force restart (clears data and reruns)
@@ -68,10 +71,12 @@ curl http://localhost:5000/users/stankur/data
 ## Direct Pipeline Commands
 
 ```bash
-# Run full pipeline for a user
+# Run full pipeline for any user
 just run stankur
+just run octocat
+just run torvalds
 
-# Run specific assets
+# Run specific assets for any user
 just run-selection stankur "fetch_repos_asset,select_highlighted_repos_asset"
 ```
 
@@ -113,11 +118,7 @@ just check
 
 ### Users
 
-Edit `assets.py` to add/remove users in the `StaticPartitionsDefinition`:
-
-```python
-users_partitions = StaticPartitionsDefinition(["stankur", "ProjectsByJackHe", "SamuelmdLow"])
-```
+The pipeline works with **any GitHub username** dynamically. No configuration needed - just call the API with any valid GitHub username and it will process that user.
 
 ## Troubleshooting
 

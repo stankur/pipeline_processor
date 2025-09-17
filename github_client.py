@@ -131,36 +131,3 @@ class GitHubClient:
         resp = self._request("GET", download_url)
         return resp.text, meta
 
-
-def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-
-def write_json(path: str, data) -> None:
-    ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def write_csv(path: str, rows: list[dict], fieldnames: list[str]) -> None:
-    import csv
-
-    ensure_dir(os.path.dirname(path))
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in rows:
-            w.writerow({k: r.get(k) for k in fieldnames})
-
-
-def normalize_repo_fields(repo: dict) -> dict:
-    return {
-        "name": repo.get("name"),
-        "description": repo.get("description"),
-        "fork": repo.get("fork"),
-        "stargazers_count": repo.get("stargazers_count"),
-        "created_at": repo.get("created_at"),
-        "pushed_at": repo.get("pushed_at"),
-        "html_url": repo.get("html_url"),
-    }
-

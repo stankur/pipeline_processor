@@ -1,18 +1,19 @@
 import json
 import threading
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from dagster import materialize
 
 from db import (
-    get_conn, 
-    init_db, 
-    get_subject, 
-    get_user_repos, 
-    list_user_work_items, 
-    reset_user_work_items_to_pending, 
-    delete_user_repo_subjects
+    get_conn,
+    init_db,
+    get_subject,
+    get_user_repos,
+    list_user_work_items,
+    reset_user_work_items_to_pending,
+    delete_user_repo_subjects,
 )
 from defs import all_assets
+
 
 app = Flask(__name__)
 
@@ -20,22 +21,37 @@ app = Flask(__name__)
 init_db()
 
 
+def _build_run_config_for_username(username: str) -> dict:
+    """Construct Dagster run_config with per-asset config entries.
+
+    Each asset defined in `all_assets` expects a `UserConfig` with `username`.
+    Dagster requires config under root:ops, keyed by op/asset name.
+    """
+    ops_config: dict[str, dict] = {}
+    for asset_def in all_assets:
+        # Use the asset key as the op name (matches Dagster error expectation)
+        op_name = asset_def.key.to_user_string()
+        ops_config[op_name] = {"config": {"username": username}}
+    return {"ops": ops_config}
+
+
 def _run_worker(username: str, selection: list[str] | None = None):
     """Run the Dagster worker for a specific username using SDK."""
     try:
         print(f"[api] materializing assets for username={username} selection={selection}")
-        
-        # Use Dagster SDK to materialize assets
+
+        run_config = _build_run_config_for_username(username)
+
         result = materialize(
             assets=all_assets,
-            partition_key=username,
+            run_config=run_config,
             selection=selection,
-            raise_on_error=False  # Don't crash API on task failures
+            raise_on_error=False,  # Don't crash API on task failures
         )
-        
+
         print(f"[api] materialization completed for username={username} success={result.success}")
         return result.success
-        
+
     except Exception as e:
         print(f"[api] materialization error for username={username}: {e}")
         return False
@@ -52,8 +68,8 @@ def _run_worker_async(username: str, selection: list[str] | None = None):
 def start(username: str):
     """Start the full pipeline for a user."""
     print(f"[api] start called username={username}")
-    _run_worker(username)
-    print(f"[api] start done username={username}")
+    _run_worker_async(username)
+    print(f"[api] start queued username={username}")
     return jsonify({"ok": True, "queued": True})
 
 
@@ -62,31 +78,27 @@ def restart(username: str):
     """Force reset and rerun the full pipeline for a user."""
     print(f"[api] restart called username={username}")
     conn = get_conn()
-    
+
     # Clean up existing data
     delete_user_repo_subjects(conn, username)
-    reset_user_work_items_to_pending(conn, username, [
-        "fetch_profile", 
-        "fetch_repos", 
-        "select_highlighted_repos",
-        "infer_user_theme",
-        "enhance_repo_media",
-        "generate_repo_blurb", 
-        "finalize_user_profile"
-    ])
+    reset_user_work_items_to_pending(
+        conn,
+        username,
+        [
+            "fetch_profile",
+            "fetch_repos",
+            "select_highlighted_repos",
+            "infer_user_theme",
+            "enhance_repo_media",
+            "generate_repo_blurb",
+        ],
+    )
     conn.commit()
-    
+
     # Run the worker
-    _run_worker(username)
-    print(f"[api] restart done username={username}")
+    _run_worker_async(username)
+    print(f"[api] restart queued username={username}")
     return jsonify({"ok": True, "queued": True, "forced": True})
-
-
-@app.post("/users/<username>/refresh")
-def refresh(username: str):
-    """Refresh (deprecated, use /restart instead)."""
-    print(f"[api] refresh called username={username} (deprecated; use /restart)")
-    return restart(username)
 
 
 @app.get("/users/<username>/data")
@@ -125,3 +137,5 @@ def progress(username: str):
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
+
+

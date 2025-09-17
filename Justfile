@@ -59,6 +59,19 @@ clean:
     rm -rf .mypy_cache/
     rm -rf .pytest_cache/
 
+# API wrapper commands
+start user="stankur":
+    curl -X POST http://localhost:5000/users/{{user}}/start
+
+restart user="stankur":
+    curl -X POST http://localhost:5000/users/{{user}}/restart
+
+progress user="stankur":
+    curl http://localhost:5000/users/{{user}}/progress
+
+data user="stankur":
+    curl http://localhost:5000/users/{{user}}/data
+
 # Show available commands
 help:
     @just --list
