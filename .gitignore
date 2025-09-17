@@ -1,0 +1,42 @@
+# macOS cruft
+.DS_Store
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment files (but allow .env.example)
+.env
+!.env.example
+
+# Dagster local state/logs
+dagster_home/
+.dagster/
+dagster_logs/
+.run_storage/
+event_logs/
+schedule_logs/
+sensor_logs/
+
+# IDE and linting
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.vscode/
+.idea/
+
+# SQLite databases (if any local ones are created)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Temporary files
+tmp/
+temp/

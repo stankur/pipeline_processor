@@ -1,0 +1,212 @@
+import sqlite3
+import time
+import os
+from pathlib import Path
+
+# Allow overriding DB path via environment variable
+_default_db_path = Path(__file__).parent / "app.db"
+DB_PATH = Path(os.environ.get("NET_DB_PATH", str(_default_db_path)))
+
+
+def get_conn() -> sqlite3.Connection:
+    """Return a SQLite connection to the app database with Row dict access."""
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    """Create tables and indexes if they don't exist (idempotent)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subjects (
+          subject_type TEXT NOT NULL,
+          subject_id   TEXT NOT NULL,
+          data_json    TEXT,
+          updated_at   REAL,
+          PRIMARY KEY (subject_type, subject_id)
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS work_items (
+          id           TEXT PRIMARY KEY,
+          kind         TEXT NOT NULL,
+          subject_type TEXT NOT NULL,
+          subject_id   TEXT NOT NULL,
+          status       TEXT NOT NULL,
+          output_json  TEXT,
+          processed_at REAL
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_work_item
+        ON work_items(kind, subject_type, subject_id);
+        """
+    )
+    conn.commit()
+    print(f"[db] init_db done path={DB_PATH}")
+
+
+def upsert_subject(conn: sqlite3.Connection, subject_type: str, subject_id: str, data_json: str) -> None:
+    """Insert or update a subject snapshot JSON and bump its updated_at.
+
+    subject_type: 'user' or 'repo'
+    subject_id:   'alice' or 'alice/repo'
+    data_json:    JSON string to store as the latest snapshot
+    """
+    now = time.time()
+    try:
+        print(f"[db] upsert_subject start {subject_type}:{subject_id} bytes={len(data_json) if data_json else 0}")
+        conn.execute(
+            """
+            INSERT INTO subjects(subject_type, subject_id, data_json, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(subject_type, subject_id)
+            DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at
+            """,
+            (subject_type, subject_id, data_json, now),
+        )
+        print(f"[db] upsert_subject ok {subject_type}:{subject_id}")
+    except sqlite3.Error as e:
+        print(f"[db] upsert_subject error {subject_type}:{subject_id} err={e}")
+        raise
+
+
+def get_subject(conn: sqlite3.Connection, subject_type: str, subject_id: str) -> sqlite3.Row | None:
+    """Fetch a subject row (or None) for the given type/id."""
+    return conn.execute(
+        "SELECT subject_type, subject_id, data_json, updated_at FROM subjects WHERE subject_type=? AND subject_id=?",
+        (subject_type, subject_id),
+    ).fetchone()
+
+
+def get_user_repos(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
+    """List all repo subject rows owned by username (subject_id LIKE 'username/%')."""
+    like = f"{username}/%"
+    return conn.execute(
+        "SELECT subject_id, data_json, updated_at FROM subjects WHERE subject_type='repo' AND subject_id LIKE ?",
+        (like,),
+    ).fetchall()
+
+
+def ensure_work_item(conn: sqlite3.Connection, kind: str, subject_type: str, subject_id: str) -> bool:
+    """Ensure a work_item exists; return True if inserted (was missing), else False."""
+    row = conn.execute(
+        "SELECT id FROM work_items WHERE kind=? AND subject_type=? AND subject_id=?",
+        (kind, subject_type, subject_id),
+    ).fetchone()
+    if row:
+        print(f"[db] ensure_work_item exists kind={kind} subject={subject_type}:{subject_id}")
+        return False
+    import uuid
+    try:
+        print(f"[db] ensure_work_item insert kind={kind} subject={subject_type}:{subject_id}")
+        conn.execute(
+            "INSERT INTO work_items(id, kind, subject_type, subject_id, status) VALUES(?, ?, ?, ?, 'pending')",
+            (uuid.uuid4().hex, kind, subject_type, subject_id),
+        )
+        print(f"[db] ensure_work_item ok kind={kind} subject={subject_type}:{subject_id}")
+        return True
+    except sqlite3.Error as e:
+        print(f"[db] ensure_work_item error kind={kind} subject={subject_type}:{subject_id} err={e}")
+        raise
+
+
+def set_work_status(
+    conn: sqlite3.Connection,
+    kind: str,
+    subject_type: str,
+    subject_id: str,
+    status: str,
+    output_json: str | None = None,
+) -> None:
+    """Update a work_item status and optionally its output_json/processed_at.
+
+    If status is 'succeeded', processed_at is set to now.
+    """
+    processed_at = time.time() if status == "succeeded" else None
+    try:
+        print(
+            f"[db] set_work_status kind={kind} subject={subject_type}:{subject_id} status={status} processed_at={processed_at}"
+        )
+        conn.execute(
+            "UPDATE work_items SET status=?, output_json=COALESCE(?, output_json), processed_at=COALESCE(?, processed_at) WHERE kind=? AND subject_type=? AND subject_id=?",
+            (status, output_json, processed_at, kind, subject_type, subject_id),
+        )
+        print(f"[db] set_work_status ok kind={kind} subject={subject_type}:{subject_id} status={status}")
+    except sqlite3.Error as e:
+        print(f"[db] set_work_status error kind={kind} subject={subject_type}:{subject_id} err={e}")
+        raise
+
+
+def list_user_work_items(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
+    """List all work_items for a user-scoped subject (two tasks in this phase)."""
+    return conn.execute(
+        "SELECT kind, status, output_json, processed_at FROM work_items WHERE subject_type='user' AND subject_id=? ORDER BY kind",
+        (username,),
+    ).fetchall()
+
+
+def list_user_pending_failed(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
+    """List user work_items currently in 'pending' or 'failed' states for enqueue healing."""
+    return conn.execute(
+        "SELECT kind, subject_type, subject_id FROM work_items WHERE subject_type='user' AND subject_id=? AND status IN ('pending','failed')",
+        (username,),
+    ).fetchall()
+
+
+def get_work_item(
+    conn: sqlite3.Connection, kind: str, subject_type: str, subject_id: str
+) -> sqlite3.Row | None:
+    """Fetch a single work_item row if it exists, else None."""
+    return conn.execute(
+        "SELECT id, kind, subject_type, subject_id, status, output_json, processed_at FROM work_items WHERE kind=? AND subject_type=? AND subject_id=?",
+        (kind, subject_type, subject_id),
+    ).fetchone()
+
+
+def list_repo_work_items(
+    conn: sqlite3.Connection, subject_id: str
+) -> list[sqlite3.Row]:
+    """List all repo-scoped work_items for a specific repo subject_id ('user/repo')."""
+    return conn.execute(
+        "SELECT kind, status, output_json FROM work_items WHERE subject_type='repo' AND subject_id=?",
+        (subject_id,),
+    ).fetchall()
+
+
+def list_user_repo_pending_failed(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
+    """List repo-scoped work_items in pending/failed for repos owned by username."""
+    like = f"{username}/%"
+    return conn.execute(
+        "SELECT kind, subject_type, subject_id FROM work_items WHERE subject_type='repo' AND subject_id LIKE ? AND status IN ('pending','failed')",
+        (like,),
+    ).fetchall()
+
+
+def reset_user_work_items_to_pending(conn: sqlite3.Connection, username: str, kinds: list[str]) -> None:
+    """Reset selected user work_items to pending for a force rerun."""
+    print(f"[db] reset_work_items user={username} kinds={kinds}")
+    qmarks = ",".join(["?"] * len(kinds))
+    params = [*kinds, username]
+    conn.execute(
+        f"UPDATE work_items SET status='pending', output_json=NULL, processed_at=NULL WHERE kind IN ({qmarks}) AND subject_type='user' AND subject_id=?",
+        params,
+    )
+    print(f"[db] reset_work_items ok user={username}")
+
+
+def delete_user_repo_subjects(conn: sqlite3.Connection, username: str) -> None:
+    """Delete all repo subjects for a user (clean slate before refetch/filter)."""
+    print(f"[db] delete_user_repo_subjects user={username}")
+    conn.execute(
+        "DELETE FROM subjects WHERE subject_type='repo' AND subject_id LIKE ?",
+        (f"{username}/%",),
+    )
+    print(f"[db] delete_user_repo_subjects ok user={username}")

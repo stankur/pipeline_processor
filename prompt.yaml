@@ -1,0 +1,45 @@
+ubc_student_prompt: |
+    Your goal is as a gatekeeper to a community that is only meant for UBC students. You will have to filter out people who are CLEARLY not a UBC student. Keep in mind this is meant to filter out only people who are surely not a UBC student. So, if it is ambiguous, then don't filter them out. But if it is clear, for example, their location is in China, or nyc, or their bio says they are in NUS, then filter out those people. You just have to output one word answer YES or NO. YES is if the user might be a UBC student, NO if the user is clearly not a UBC student. Just one word answer, nothing else.
+
+hobby_builder_prompt: |
+    there are people who build things for hobby, in their free time, what they do is building stuff, and they are technically inclined and curious, and ambitious. I just need you to classify whether this github profile matches that criteria. People who code professionally but not in free time, doing projects for work do not pass, also people who do it for school, uni assignments do not pass, people who seem to be doing projects to hit keywords for job search don't pass, people who only do projects at hackathons do not pass. does this person seem to have a taste, do their project show that they have a passion for some particular theme, like an obsession because they are pursuing it, the type of person who would work or start a startup, rather than go to big tech. And it must also be something that is rather pursuing an ambitious vision, rather than starting startups for the sake of starting one type. curious, exeprimental, learner, builder type. Yes or no one word answer, just one answer.
+
+enriching_prompt: |
+    in a short and simple noun phrase, what is the main theme of what this person is trying to achieve (the vision), and can you give a small list of respository names (1-5), just the names without description, that highlight it best. if you don't think this person demonstrates a thematic vision, instead provide the main interest. Write on top of the noun phrase whether it is a vision or interest. It should reflect the person well. It should be that if someone looks at the repo, this description really fits well as a unifying core theme. If you choose to state a vision, a vision should sound like a mission, a goal, not the way that the person is trying to achieve it, but what are they working towards. It is important that what you say is the CORE theme. Especially if it is vision, it should be very core. safer to go for interest if there is no single unifying core thematic vision.
+
+    For example,
+
+    Vision = making search multimodal, free education for all, make web servers intelligent
+    Interest = experimenting with web frameworks, low level systems
+
+    output in the JSON format, parsable with json.loads with no metacomment, don't wrap with backticks, just output a single object:
+
+    {
+    theme: string,
+    repos: string[]
+    }
+
+    for the theme, don't specify whether it is interest or vision, just state the theme, it will be used as a blurb.
+
+    repos:
+
+user_similarity_prompt: |
+    do you think that this person:
+    """
+    {person_a_repos}
+    """
+
+    Might likely be interested in the work of this person? Think of what domain of projects that they are creating, and whether they are likely interested in the same thing, and just output one answer, YES or NO, nothing else:
+
+    """
+    {person_b_repos}
+    """
+
+repo_similarity_prompt: |
+    Given that this person has worked on these repositories, think of what domain of projects that they are creating, and whether the repo at hand is in similar technological domain, or for a similar vision/purpose, or might be something that the person might find interesting, and just output one answer, YES or NO, nothing else. If you don't think there is a match, just output NO.
+
+    person's repos:
+    {person_repos}
+
+    repo at hand:
+    {target_repo}
