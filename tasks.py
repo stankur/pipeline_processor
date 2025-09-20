@@ -607,3 +607,105 @@ def extract_repo_emphasis(repo_id: str) -> None:
     conn.commit()
     print(f"[task] extract_repo_emphasis done repo={repo_id} count={len(emphasis_list)}")
 
+
+# -------------------- New task: extract keywords (skills) from generated_description --------------------
+
+def extract_repo_keywords(repo_id: str) -> None:
+    """Extract 1-4 conceptual skill keywords from generated_description and store on repo subject.
+
+    Fails fast if preconditions or parsing fail; succeeds only when keywords are extracted and saved.
+    """
+    print(f"[task] extract_repo_keywords start repo={repo_id}")
+    conn = get_conn()
+    set_work_status(conn, "extract_repo_keywords", "repo", repo_id, "running")
+
+    # Load repo subject
+    row = get_subject(conn, "repo", repo_id)
+    if not row or not row["data_json"]:
+        set_work_status(
+            conn,
+            "extract_repo_keywords",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": "no_subject"}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason=no_subject")
+        return
+
+    try:
+        base = json.loads(row["data_json"]) or {}
+    except Exception:
+        set_work_status(
+            conn,
+            "extract_repo_keywords",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": "invalid_subject_json"}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason=invalid_subject_json")
+        return
+
+    desc = base.get("generated_description")
+    if not isinstance(desc, str) or not desc.strip():
+        set_work_status(
+            conn,
+            "extract_repo_keywords",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": "no_generated_description"}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason=no_generated_description")
+        return
+
+    prompt = (
+        "can you extract the main keywords that represent the technical techniques/knowledge/concepts/interest displayed in this project, "
+        "and output an array of 1-4 keywords, that will be used to display the skills of the person (don't list tools/frameworks/programming language):\n\n"
+        f"{desc}"
+    )
+
+    # Call LLM and parse strictly
+    try:
+        text = _openrouter_chat(prompt)
+        if not text:
+            raise ValueError("empty_llm_response")
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError("not_array")
+        if not (1 <= len(data) <= 4):
+            raise ValueError("array_length_out_of_range")
+        if not all(isinstance(x, str) and x.strip() for x in data):
+            raise ValueError("invalid_array_elements")
+        keywords_list = [x.strip() for x in data]
+    except Exception as e:
+        set_work_status(
+            conn,
+            "extract_repo_keywords",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": str(e)}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason={e}")
+        return
+
+    # Persist keywords and mark success
+    base["keywords"] = keywords_list
+    upsert_subject(conn, "repo", repo_id, json.dumps(base))
+    set_work_status(
+        conn,
+        "extract_repo_keywords",
+        "repo",
+        repo_id,
+        "succeeded",
+        json.dumps({"extracted": True, "count": len(keywords_list)}),
+    )
+    conn.commit()
+    print(f"[task] extract_repo_keywords done repo={repo_id} count={len(keywords_list)}")
+
