@@ -91,6 +91,7 @@ def restart(username: str):
             "infer_user_theme",
             "enhance_repo_media",
             "generate_repo_blurb",
+            "extract_repo_emphasis",
         ],
     )
     conn.commit()

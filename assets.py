@@ -16,6 +16,7 @@ from tasks import (
     infer_user_theme,
     enhance_repo_media,
     generate_repo_blurb,
+    extract_repo_emphasis,
 )
 
 class UserConfig(Config):
@@ -115,3 +116,17 @@ def generate_repo_blurb_asset(config: UserConfig) -> None:
         repo_id = repo_by_name.get(repo_name)
         if repo_id:
             generate_repo_blurb(repo_id)
+
+
+@asset(deps=[generate_repo_blurb_asset])
+def extract_repo_emphasis_asset(config: UserConfig) -> None:
+    """Extract emphasis only for repos that successfully generated blurbs."""
+    username = config.username
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT subject_id FROM work_items WHERE kind='generate_repo_blurb' AND subject_type='repo' AND status='succeeded' AND subject_id LIKE ?",
+        (f"{username}/%",),
+    ).fetchall()
+    for row in rows:
+        repo_id = row["subject_id"]
+        extract_repo_emphasis(repo_id)

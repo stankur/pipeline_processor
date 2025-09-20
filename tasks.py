@@ -508,3 +508,102 @@ def generate_repo_blurb(repo_id: str) -> None:
     print(f"[task] generate_repo_blurb done repo={repo_id} has_desc={bool(desc)}")
 
 
+# -------------------- New task: extract emphasis from generated_description --------------------
+
+def extract_repo_emphasis(repo_id: str) -> None:
+    """Extract technology emphasis array from generated_description and store it on the repo subject.
+
+    Fails fast if preconditions or parsing fail; succeeds only when emphasis is extracted and saved.
+    """
+    print(f"[task] extract_repo_emphasis start repo={repo_id}")
+    conn = get_conn()
+    set_work_status(conn, "extract_repo_emphasis", "repo", repo_id, "running")
+
+    # Load repo subject
+    row = get_subject(conn, "repo", repo_id)
+    if not row or not row["data_json"]:
+        set_work_status(
+            conn,
+            "extract_repo_emphasis",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": "no_subject"}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=no_subject")
+        return
+
+    try:
+        base = json.loads(row["data_json"]) or {}
+    except Exception:
+        set_work_status(
+            conn,
+            "extract_repo_emphasis",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": "invalid_subject_json"}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=invalid_subject_json")
+        return
+
+    desc = base.get("generated_description")
+    if not isinstance(desc, str) or not desc.strip():
+        set_work_status(
+            conn,
+            "extract_repo_emphasis",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": "no_generated_description"}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=no_generated_description")
+        return
+
+    prompt = (
+        "can you extract an array parseable with json.loads, of the frameworks that this project is dependent on, "
+        "languages, technologies, or libraries used. Just the array and nothing else, make the capitalization exactly as written:\n\n"
+        f"{desc}"
+    )
+
+    # Call LLM and parse strictly
+    try:
+        text = _openrouter_chat(prompt)
+        if not text:
+            raise ValueError("empty_llm_response")
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError("not_array")
+        if not all(isinstance(x, str) and x.strip() for x in data):
+            raise ValueError("invalid_array_elements")
+        emphasis_list = [x.strip() for x in data]
+    except Exception as e:
+        set_work_status(
+            conn,
+            "extract_repo_emphasis",
+            "repo",
+            repo_id,
+            "failed",
+            json.dumps({"reason": str(e)}),
+        )
+        conn.commit()
+        print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason={e}")
+        return
+
+    # Persist emphasis and mark success
+    base["emphasis"] = emphasis_list
+    upsert_subject(conn, "repo", repo_id, json.dumps(base))
+    set_work_status(
+        conn,
+        "extract_repo_emphasis",
+        "repo",
+        repo_id,
+        "succeeded",
+        json.dumps({"extracted": True, "count": len(emphasis_list)}),
+    )
+    conn.commit()
+    print(f"[task] extract_repo_emphasis done repo={repo_id} count={len(emphasis_list)}")
+
