@@ -87,23 +87,6 @@ def fetch_repos(username: str) -> None:
         # language
         if not repo.get("language"):
             continue
-        # README
-        try:
-            readme_content, _ = client.get_repo_readme(username, name)
-            if not readme_content:
-                continue
-        except Exception:
-            continue
-        # commits unique days >= 4 (up to 100 commits)
-        try:
-            commits = client.get_json(
-                f"https://api.github.com/repos/{username}/{name}/commits",
-                params={"per_page": 100},
-            )
-            if _unique_commit_days(commits) < 4:
-                continue
-        except Exception:
-            continue
         # recency (2 years)
         pushed = repo.get("pushed_at") or repo.get("updated_at")
         if not _recent_enough(pushed, years=2):
@@ -209,6 +192,29 @@ def select_highlighted_repos(username: str) -> None:
         print(f"[task] select_highlighted_repos kept_repos count={len(kept_names)} names={kept_names}")
     except Exception:
         pass
+
+    # Filter to strict criteria (README + 4 unique commit days) for highlight selection
+    client = GitHubClient()
+    strict: List[Dict[str, Any]] = []
+    for r in repos:
+        try:
+            name = r.get("name")
+            if not name:
+                continue
+            readme_content, _ = client.get_repo_readme(username, name)
+            if not readme_content:
+                continue
+            commits = client.get_json(
+                f"https://api.github.com/repos/{username}/{name}/commits",
+                params={"per_page": 100},
+            )
+            if _unique_commit_days(commits) < 4:
+                continue
+            strict.append(r)
+        except Exception:
+            continue
+    repos = strict  # only nominees are considered for highlights
+    print(f"[task] select_highlighted_repos strict_repos count={len(repos)}")
 
     prompts = _load_prompts()
     prompt_tmpl = prompts.get("enriching_prompt") if prompts else None
