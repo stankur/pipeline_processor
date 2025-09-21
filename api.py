@@ -92,7 +92,7 @@ def restart(username: str):
             "enhance_repo_media",
             "generate_repo_blurb",
             "extract_repo_emphasis",
-                "extract_repo_keywords",
+            "extract_repo_keywords",
         ],
     )
     conn.commit()
