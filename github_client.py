@@ -131,3 +131,115 @@ class GitHubClient:
         resp = self._request("GET", download_url)
         return resp.text, meta
 
+    # -------- Branches / Commits ---------
+    def list_branches(
+        self,
+        owner: str,
+        repo: str,
+        per_page: int = 100,
+        limit: int | None = None,
+    ) -> list[dict]:
+        assert per_page <= 100
+        results: list[dict] = []
+        page = 1
+        while True:
+            if limit is not None and len(results) >= limit:
+                break
+            params = {"per_page": per_page, "page": page}
+            data = self.get_json(f"{GITHUB_API}/repos/{owner}/{repo}/branches", params)
+            if not data:
+                break
+            results.extend(data)
+            if len(data) < per_page:
+                break
+            page += 1
+        return results[: limit or None]
+
+    def list_commits(
+        self,
+        owner: str,
+        repo: str,
+        author: str | None = None,
+        sha: str | None = None,
+        per_page: int = 100,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """List commits, optionally filtering by author and branch (sha)."""
+        assert per_page <= 100
+        results: list[dict] = []
+        page = 1
+        while True:
+            if limit is not None and len(results) >= limit:
+                break
+            params: dict = {"per_page": per_page, "page": page}
+            if author:
+                params["author"] = author
+            if sha:
+                params["sha"] = sha
+            data = self.get_json(f"{GITHUB_API}/repos/{owner}/{repo}/commits", params)
+            if not data:
+                break
+            results.extend(data)
+            if len(data) < per_page:
+                break
+            page += 1
+        return results[: limit or None]
+
+    # -------- GraphQL ---------
+    def _graphql(self, query: str, variables: dict | None = None) -> dict:
+        url = "https://api.github.com/graphql"
+        headers = {"Accept": "application/vnd.github+json"}
+        # requests.Session already has Authorization if token provided
+        payload = {"query": query, "variables": variables or {}}
+        resp = self._request("POST", url, json=payload, headers=headers)
+        data = resp.json()
+        if "errors" in data:
+            raise requests.HTTPError(str(data["errors"]))
+        return data
+
+    def list_contributed_repos(
+        self,
+        login: str,
+        from_iso: str,
+        to_iso: str,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return unique repos where the user contributed commits or PRs in the window.
+
+        Returns list of dicts: {"owner": str, "name": str}
+        """
+        query = """
+        query($login: String!, $from: DateTime!, $to: DateTime!) {
+          user(login: $login) {
+            contributionsCollection(from: $from, to: $to) {
+              commitContributionsByRepository(maxRepositories: 100) {
+                repository { name owner { login } isPrivate }
+              }
+              pullRequestContributionsByRepository(maxRepositories: 100) {
+                repository { name owner { login } isPrivate }
+              }
+            }
+          }
+        }
+        """
+        data = self._graphql(query, {"login": login, "from": from_iso, "to": to_iso})
+        cc = (
+            data.get("data", {})
+            .get("user", {})
+            .get("contributionsCollection", {})
+        )
+        repos: dict[str, dict] = {}
+        for key in ("commitContributionsByRepository", "pullRequestContributionsByRepository"):
+            arr = cc.get(key) or []
+            for entry in arr:
+                repo = entry.get("repository") or {}
+                if not repo or repo.get("isPrivate"):
+                    continue
+                owner_login = (repo.get("owner") or {}).get("login")
+                name = repo.get("name")
+                if owner_login and name:
+                    rid = f"{owner_login}/{name}"
+                    repos[rid] = {"owner": owner_login, "name": name}
+        values = list(repos.values())
+        return values[: limit or None]
+

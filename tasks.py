@@ -10,8 +10,16 @@ import yaml
 import tiktoken
 from dotenv import load_dotenv
 
-from db import get_conn, upsert_subject, set_work_status, get_subject, get_user_repos
+from db import (
+    get_conn,
+    upsert_subject,
+    set_work_status,
+    get_subject,
+    get_user_repos,
+    upsert_user_repo_link,
+)
 from github_client import GitHubClient
+from utils import parse_llm_json
 
 from logging import getLogger
 
@@ -39,6 +47,47 @@ def _recent_enough(ts: str | None, years: int = 2) -> bool:
         return dt >= (datetime.now(timezone.utc) - timedelta(days=years * 365))
     except Exception:
         return True
+
+
+# Activity thresholds and limits
+ACTIVITY_DAYS_THRESHOLD = 4
+RECENT_YEARS = 2
+MAX_BRANCHES_TO_SCAN = 20
+
+
+def _count_author_unique_commit_days(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    author: str,
+    max_branches: int = MAX_BRANCHES_TO_SCAN,
+    short_circuit_at: int = ACTIVITY_DAYS_THRESHOLD,
+) -> int:
+    """Count unique commit days by author across up to N branches, short-circuiting when threshold is met."""
+    try:
+        branches = client.list_branches(owner, repo, per_page=100, limit=max_branches)
+    except Exception:
+        branches = []
+    seen_days: set[str] = set()
+    for br in branches:
+        name = (br.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            commits = client.list_commits(owner, repo, author=author, sha=name, per_page=100, limit=100)
+        except Exception:
+            commits = []
+        for c in commits:
+            try:
+                meta = c.get("commit", {})
+                date_str = meta.get("author", {}).get("date") or meta.get("committer", {}).get("date")
+                if date_str:
+                    seen_days.add(date_str.split("T")[0])
+                if len(seen_days) >= short_circuit_at:
+                    return len(seen_days)
+            except Exception:
+                continue
+    return len(seen_days)
 
 
 def fetch_profile(username: str) -> None:
@@ -79,44 +128,142 @@ def fetch_repos(username: str) -> None:
     repos = client.list_repos(username, sort="pushed", per_page=30, limit=30)
     print(f"[task] fetch_repos fetched count={len(repos)}")
 
-    kept: list[dict] = []
+    kept_subjects: list[dict] = []
 
     for repo in repos:
         name = repo.get("name")
-        full_name = repo.get("full_name") or f"{username}/{name}"
+        owner_login = (repo.get("owner") or {}).get("login") or username
+        full_name = repo.get("full_name") or f"{owner_login}/{name}"
         # language
         if not repo.get("language"):
             continue
         # recency (2 years)
         pushed = repo.get("pushed_at") or repo.get("updated_at")
-        if not _recent_enough(pushed, years=2):
+        if not _recent_enough(pushed, years=RECENT_YEARS):
             continue
-        # non-fork for kept set
-        if repo.get("fork"):
-            continue
+        is_fork = bool(repo.get("fork"))
 
-        kept.append({
+        # Build lean subject payload
+        subject = {
             "id": full_name,
             "name": name,
             "description": repo.get("description"),
             "language": repo.get("language"),
             "stargazers_count": repo.get("stargazers_count", 0),
-            "fork": False,
+            "fork": is_fork,
             "pushed_at": repo.get("pushed_at"),
             "updated_at": repo.get("updated_at"),
             "topics": repo.get("topics", []),
-        })
+        }
 
-    print(f"[task] fetch_repos kept count={len(kept)}")
+        include_reason: str | None = None
+        user_commit_days: int | None = None
 
-    # Upsert only kept repos
-    for r in kept:
-        upsert_subject(conn, "repo", r["id"], json.dumps(r))
+        if not is_fork:
+            include_reason = "owned"
+        else:
+            # Include active forks only if author has >= threshold unique commit days across branches
+            days = _count_author_unique_commit_days(client, owner_login, name, username)
+            user_commit_days = days
+            if days >= ACTIVITY_DAYS_THRESHOLD:
+                include_reason = "fork_active"
 
-    set_work_status(conn, "fetch_repos", "user", username, "succeeded", json.dumps({"fetched": len(kept)}))
+        if include_reason:
+            kept_subjects.append(subject)
+            upsert_subject(conn, "repo", full_name, json.dumps(subject))
+            upsert_user_repo_link(conn, username, full_name, include_reason, user_commit_days)
+
+    print(f"[task] fetch_repos kept owned+forks count={len(kept_subjects)}")
+
+    # Discover contributed repos (non-owned) within recent window via GraphQL
+    # GraphQL 'contributionsCollection' enforces <= 1 year spans, so aggregate over rolling windows
+    try:
+        now = datetime.now(timezone.utc)
+        lookback_start = now - timedelta(days=RECENT_YEARS * 365)
+        window_days = 365  # GitHub GraphQL maximum window
+        contributed_map: dict[str, dict] = {}
+
+        cursor_to = now
+        while cursor_to > lookback_start:
+            cursor_from = max(lookback_start, cursor_to - timedelta(days=window_days))
+            try:
+                window_results = client.list_contributed_repos(
+                    username,
+                    cursor_from.isoformat(),
+                    cursor_to.isoformat(),
+                    limit=200,
+                )
+                print(
+                    f"[task] fetch_repos contributions window {cursor_from.date()}..{cursor_to.date()} => {len(window_results)}"
+                )
+            except Exception as e:
+                print(
+                    f"[task] fetch_repos contributions window {cursor_from.date()}..{cursor_to.date()} ERROR: {e}"
+                )
+                window_results = []
+
+            for r in window_results:
+                owner = r.get("owner")
+                name = r.get("name")
+                if owner and name:
+                    contributed_map[f"{owner}/{name}"] = r
+
+            # Move window backwards
+            cursor_to = cursor_from
+
+        contributed = list(contributed_map.values())
+        # Cap total contributed repos considered downstream
+        if len(contributed) > 200:
+            contributed = contributed[:200]
+        print(f"[task] fetch_repos contributions aggregated unique={len(contributed)}")
+    except Exception as e:
+        print(f"[task] fetch_repos contributions discovery ERROR: {e}")
+        contributed = []
+
+    seen_ids = {s.get("id") for s in kept_subjects}
+    for r in contributed:
+        owner = r.get("owner")
+        name = r.get("name")
+        if not owner or not name:
+            continue
+        full_name = f"{owner}/{name}"
+        if full_name in seen_ids:
+            continue
+        # Fetch repo metadata
+        try:
+            meta = client.get_repo(owner, name)
+        except Exception:
+            continue
+        language = meta.get("language")
+        if not language:
+            continue
+        pushed = meta.get("pushed_at") or meta.get("updated_at")
+        if not _recent_enough(pushed, years=RECENT_YEARS):
+            continue
+        # Count author's commit days across branches
+        days = _count_author_unique_commit_days(client, owner, name, username)
+        if days < ACTIVITY_DAYS_THRESHOLD:
+            continue
+        subject = {
+            "id": full_name,
+            "name": name,
+            "description": meta.get("description"),
+            "language": language,
+            "stargazers_count": meta.get("stargazers_count", 0),
+            "fork": bool(meta.get("fork")),
+            "pushed_at": meta.get("pushed_at"),
+            "updated_at": meta.get("updated_at"),
+            "topics": meta.get("topics", []),
+        }
+        upsert_subject(conn, "repo", full_name, json.dumps(subject))
+        upsert_user_repo_link(conn, username, full_name, "contributed", days)
+        kept_subjects.append(subject)
+        seen_ids.add(full_name)
+
+    set_work_status(conn, "fetch_repos", "user", username, "succeeded", json.dumps({"fetched": len(kept_subjects)}))
     conn.commit()
     print(f"[task] fetch_repos commit username={username}")
-    print(f"[task] fetch_repos done username={username} kept={len(kept)}")
+    print(f"[task] fetch_repos done username={username} kept={len(kept_subjects)}")
 
 
 # -------------------- Prompt loading and LLM helpers --------------------
@@ -182,6 +329,10 @@ def select_highlighted_repos(username: str) -> None:
         try:
             obj = json.loads(r["data_json"]) if r["data_json"] else None
             if obj:
+                # Attach link metadata for downstream filtering
+                obj["_include_reason"] = r["include_reason"] if "include_reason" in r.keys() else None
+                obj["_user_commit_days"] = r["user_commit_days"] if "user_commit_days" in r.keys() else None
+                obj["_repo_id"] = r["subject_id"]
                 repos.append(obj)
         except Exception:
             continue
@@ -193,22 +344,23 @@ def select_highlighted_repos(username: str) -> None:
     except Exception:
         pass
 
-    # Filter to strict criteria (README + 4 unique commit days) for highlight selection
+    # Filter to strict criteria (README + >= ACTIVITY_DAYS_THRESHOLD unique commit days by user) for highlight selection
     client = GitHubClient()
     strict: List[Dict[str, Any]] = []
     for r in repos:
         try:
-            name = r.get("name")
-            if not name:
+            repo_id = r.get("_repo_id") or ""
+            if "/" not in repo_id:
                 continue
-            readme_content, _ = client.get_repo_readme(username, name)
+            owner, name = repo_id.split("/", 1)
+            readme_content, _ = client.get_repo_readme(owner, name)
             if not readme_content:
                 continue
-            commits = client.get_json(
-                f"https://api.github.com/repos/{username}/{name}/commits",
-                params={"per_page": 100},
-            )
-            if _unique_commit_days(commits) < 4:
+            days = r.get("_user_commit_days")
+            if not isinstance(days, int):
+                # Compute if not cached (owned repos path)
+                days = _count_author_unique_commit_days(client, owner, name, username)
+            if days < ACTIVITY_DAYS_THRESHOLD:
                 continue
             strict.append(r)
         except Exception:
@@ -251,7 +403,7 @@ def select_highlighted_repos(username: str) -> None:
                 if text:
                     # Log raw response
                     print(f"[task] select_highlighted_repos RESPONSE BEGIN\n{text}\nRESPONSE END")
-                    data = json.loads(text)
+                    data = parse_llm_json(text)
                     print(f"[task] select_highlighted_repos JSON parsed: {data}")
                     rr = data.get("repos") if isinstance(data, dict) else None
                     if isinstance(rr, list):
@@ -572,9 +724,12 @@ def extract_repo_emphasis(repo_id: str) -> None:
     # Call LLM and parse strictly
     try:
         text = _openrouter_chat(prompt)
+        print(f"[task] extract_repo_keywords LLM returned: {bool(text)} (length={len(text) if text else 0})")
+        if text:
+            print(f"[task] extract_repo_keywords LLM RESPONSE BEGIN\n{text}\nLLM RESPONSE END")
         if not text:
             raise ValueError("empty_llm_response")
-        data = json.loads(text)
+        data = parse_llm_json(text)
         if not isinstance(data, list):
             raise ValueError("not_array")
         if not all(isinstance(x, str) and x.strip() for x in data):
@@ -664,17 +819,21 @@ def extract_repo_keywords(repo_id: str) -> None:
         return
 
     prompt = (
-        "can you extract the main keywords that represent the technical techniques/knowledge/concepts/interest displayed in this project, "
+        "can you extract the main keywords that represent the technical techniques/knowledge/concepts needed for this project, "
         "and output an array of 1-4 keywords, that will be used to display the skills of the person (don't list tools/frameworks/programming language):\n\n"
         f"{desc}"
     )
 
     # Call LLM and parse strictly
     try:
+        print(f"[task] extract_repo_keywords PROMPT BEGIN\n{prompt}\nPROMPT END")
         text = _openrouter_chat(prompt)
+        print(f"[task] extract_repo_keywords LLM returned: {bool(text)} (length={len(text) if text else 0})")
+        if text:
+            print(f"[task] extract_repo_keywords LLM RESPONSE BEGIN\n{text}\nLLM RESPONSE END")
         if not text:
             raise ValueError("empty_llm_response")
-        data = json.loads(text)
+        data = parse_llm_json(text)
         if not isinstance(data, list):
             raise ValueError("not_array")
         if not (1 <= len(data) <= 4):
@@ -683,6 +842,12 @@ def extract_repo_keywords(repo_id: str) -> None:
             raise ValueError("invalid_array_elements")
         keywords_list = [x.strip() for x in data]
     except Exception as e:
+        try:
+            # Best-effort raw output logging to aid debugging when JSON parsing fails
+            if 'text' in locals() and text:
+                print(f"[task] extract_repo_keywords RAW RESPONSE BEGIN\n{text}\nRAW RESPONSE END")
+        except Exception:
+            pass
         set_work_status(
             conn,
             "extract_repo_keywords",

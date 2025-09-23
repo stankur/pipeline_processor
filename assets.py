@@ -125,8 +125,15 @@ def extract_repo_emphasis_asset(config: UserConfig) -> None:
     username = config.username
     conn = get_conn()
     rows = conn.execute(
-        "SELECT subject_id FROM work_items WHERE kind='generate_repo_blurb' AND subject_type='repo' AND status='succeeded' AND subject_id LIKE ?",
-        (f"{username}/%",),
+        """
+        SELECT w.subject_id
+        FROM work_items w
+        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = ?
+        WHERE w.kind = 'generate_repo_blurb'
+          AND w.subject_type = 'repo'
+          AND w.status = 'succeeded'
+        """,
+        (username,),
     ).fetchall()
     for row in rows:
         repo_id = row["subject_id"]
@@ -139,8 +146,15 @@ def extract_repo_keywords_asset(config: UserConfig) -> None:
     username = config.username
     conn = get_conn()
     rows = conn.execute(
-        "SELECT subject_id FROM work_items WHERE kind='generate_repo_blurb' AND subject_type='repo' AND status='succeeded' AND subject_id LIKE ?",
-        (f"{username}/%",),
+        """
+        SELECT w.subject_id
+        FROM work_items w
+        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = ?
+        WHERE w.kind = 'generate_repo_blurb'
+          AND w.subject_type = 'repo'
+          AND w.status = 'succeeded'
+        """,
+        (username,),
     ).fetchall()
     for row in rows:
         repo_id = row["subject_id"]

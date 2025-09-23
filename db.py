@@ -49,6 +49,19 @@ def init_db() -> None:
         ON work_items(kind, subject_type, subject_id);
         """
     )
+    # Link table: associates a username with repos to include (owned, active fork, or contributed)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_repo_links (
+          username         TEXT NOT NULL,
+          repo_id          TEXT NOT NULL,   -- subjects.subject_id (owner/repo)
+          include_reason   TEXT,            -- 'owned' | 'fork_active' | 'contributed'
+          user_commit_days INTEGER,         -- cached unique commit days by this user (nullable)
+          updated_at       REAL,
+          PRIMARY KEY (username, repo_id)
+        );
+        """
+    )
     conn.commit()
     print(f"[db] init_db done path={DB_PATH}")
 
@@ -87,11 +100,19 @@ def get_subject(conn: sqlite3.Connection, subject_type: str, subject_id: str) ->
 
 
 def get_user_repos(conn: sqlite3.Connection, username: str) -> list[sqlite3.Row]:
-    """List all repo subject rows owned by username (subject_id LIKE 'username/%')."""
-    like = f"{username}/%"
+    """List all repo subject rows linked to username via user_repo_links.
+
+    Returns rows with columns: subject_id, data_json, updated_at, include_reason, user_commit_days
+    """
     return conn.execute(
-        "SELECT subject_id, data_json, updated_at FROM subjects WHERE subject_type='repo' AND subject_id LIKE ?",
-        (like,),
+        """
+        SELECT s.subject_id, s.data_json, s.updated_at, l.include_reason, l.user_commit_days
+        FROM user_repo_links l
+        JOIN subjects s ON s.subject_type='repo' AND s.subject_id = l.repo_id
+        WHERE l.username = ?
+        ORDER BY s.updated_at DESC
+        """,
+        (username,),
     ).fetchall()
 
 
@@ -170,10 +191,60 @@ def reset_user_work_items_to_pending(conn: sqlite3.Connection, username: str, ki
 
 
 def delete_user_repo_subjects(conn: sqlite3.Connection, username: str) -> None:
-    """Delete all repo subjects for a user (clean slate before refetch/filter)."""
+    """Delete owned repo subjects for a user and clear all their repo links.
+
+    - Owned repos are identified by subject_id LIKE 'username/%' and will be removed.
+    - Contributed repos (not owned) are kept as shared subjects, but links are removed.
+    """
     print(f"[db] delete_user_repo_subjects user={username}")
+    # Remove links first
+    conn.execute(
+        "DELETE FROM user_repo_links WHERE username=?",
+        (username,),
+    )
+    # Remove owned repo subjects
     conn.execute(
         "DELETE FROM subjects WHERE subject_type='repo' AND subject_id LIKE ?",
         (f"{username}/%",),
     )
     print(f"[db] delete_user_repo_subjects ok user={username}")
+
+
+def upsert_user_repo_link(
+    conn: sqlite3.Connection,
+    username: str,
+    repo_id: str,
+    include_reason: str | None,
+    user_commit_days: int | None,
+) -> None:
+    """Insert/update a link between a user and a repo with metadata."""
+    now = time.time()
+    try:
+        print(
+            f"[db] upsert_user_repo_link user={username} repo={repo_id} reason={include_reason} days={user_commit_days}"
+        )
+        conn.execute(
+            """
+            INSERT INTO user_repo_links(username, repo_id, include_reason, user_commit_days, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(username, repo_id)
+            DO UPDATE SET include_reason=excluded.include_reason,
+                          user_commit_days=excluded.user_commit_days,
+                          updated_at=excluded.updated_at
+            """,
+            (username, repo_id, include_reason, user_commit_days, now),
+        )
+        print(f"[db] upsert_user_repo_link ok user={username} repo={repo_id}")
+    except sqlite3.Error as e:
+        print(f"[db] upsert_user_repo_link error user={username} repo={repo_id} err={e}")
+        raise
+
+
+def delete_user_repo_links(conn: sqlite3.Connection, username: str) -> None:
+    """Delete all user-to-repo links for a username."""
+    print(f"[db] delete_user_repo_links user={username}")
+    conn.execute(
+        "DELETE FROM user_repo_links WHERE username=?",
+        (username,),
+    )
+    print(f"[db] delete_user_repo_links ok user={username}")
