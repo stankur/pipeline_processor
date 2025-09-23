@@ -1,6 +1,7 @@
 dagster
 dagster-webserver
 flask
+flask-cors
 requests
 python-dotenv
 PyYAML

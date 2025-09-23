@@ -1,6 +1,8 @@
 import json
+import os
 import threading
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 from dagster import materialize
 
 from db import (
@@ -16,6 +18,14 @@ from defs import all_assets
 
 
 app = Flask(__name__)
+
+# CORS: allow only configured origins (comma-separated). Example local: http://localhost:3000
+_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if _origins:
+    CORS(app, resources={r"/*": {"origins": _origins}})
+else:
+    # If not set, default to no CORS restrictions (safest is to set ALLOWED_ORIGINS in prod)
+    CORS(app)
 
 # Initialize DB at import time
 init_db()
@@ -62,6 +72,23 @@ def _run_worker_async(username: str, selection: list[str] | None = None):
     thread = threading.Thread(target=_run_worker, args=(username, selection))
     thread.daemon = True
     thread.start()
+
+
+@app.before_request
+def _require_api_key():
+    """Require API key for all routes except health checks when API_KEY is set.
+
+    Expect header: Authorization: Bearer <API_KEY>
+    """
+    api_key = (os.environ.get("API_KEY") or "").strip()
+    if not api_key:
+        return None  # no auth enforced
+    # Allow unauthenticated health endpoint
+    if request.path in ("/healthz", "/_healthz"):
+        return None
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or auth.split(" ", 1)[1].strip() != api_key:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
 
 
 @app.post("/users/<username>/start")
@@ -137,7 +164,13 @@ def progress(username: str):
     )
 
 
+@app.get("/healthz")
+def healthz():
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, host="0.0.0.0", port=port)
 
 

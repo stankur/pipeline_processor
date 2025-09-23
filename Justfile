@@ -61,17 +61,24 @@ clean:
 
 # API wrapper commands
 start user="stankur":
-    curl -X POST http://localhost:5000/users/{{user}}/start
+    curl -X POST http://localhost:8080/users/{{user}}/start
 
 restart user="stankur":
-    curl -X POST http://localhost:5000/users/{{user}}/restart
+    curl -X POST http://localhost:8080/users/{{user}}/restart
 
 progress user="stankur":
-    curl http://localhost:5000/users/{{user}}/progress
+    curl http://localhost:8080/users/{{user}}/progress
 
 data user="stankur":
-    curl http://localhost:5000/users/{{user}}/data
+    curl http://localhost:8080/users/{{user}}/data
 
 # Show available commands
 help:
     @just --list
+
+# Docker Compose wrappers (avoid name clash with existing `start` recipe)
+compose-start:
+	docker compose up --build
+
+compose-down:
+	docker compose down
