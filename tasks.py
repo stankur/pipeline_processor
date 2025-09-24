@@ -419,6 +419,21 @@ def select_highlighted_repos(username: str) -> None:
         else:
             print(f"[task] select_highlighted_repos token count too high: {count_tokens(full_prompt)} >= 5000")
 
+    # Persist highlights immediately onto the user subject for early availability
+    try:
+        urow = get_subject(conn, "user", username)
+        ubase = {}
+        if urow and urow["data_json"]:
+            try:
+                ubase = json.loads(urow["data_json"]) or {}
+            except Exception:
+                ubase = {}
+        ubase["highlighted_repos"] = names
+        upsert_subject(conn, "user", username, json.dumps(ubase))
+    except Exception:
+        # Non-fatal: proceed to mark work item even if user subject update fails
+        pass
+
     out = {"repos": names}
     print(f"[task] select_highlighted_repos parsed repos count={len(names)} names={names}")
     set_work_status(conn, "select_highlighted_repos", "user", username, "succeeded", json.dumps(out))

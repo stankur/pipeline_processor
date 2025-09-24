@@ -8,7 +8,7 @@ WORKDIR /app
 
 # System deps (ca-certificates, curl for debugging if needed)
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    ca-certificates curl && \
+    ca-certificates curl git && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
