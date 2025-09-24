@@ -10,9 +10,31 @@ DB_PATH = Path(os.environ.get("NET_DB_PATH", str(_default_db_path)))
 
 def get_conn() -> sqlite3.Connection:
     """Return a SQLite connection to the app database with Row dict access."""
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        env_path = os.environ.get("NET_DB_PATH")
+        print(f"[db] get_conn env.NET_DB_PATH={env_path} resolved.DB_PATH={DB_PATH}")
+        parent = Path(DB_PATH).parent
+        if not parent.exists():
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+                print(f"[db] get_conn created parent dir {parent}")
+            except Exception as e:
+                print(f"[db] get_conn failed to create parent dir {parent} err={e}")
+        print(f"[db] get_conn parent exists={parent.exists()} is_dir={parent.is_dir()} path={parent}")
+        # Best-effort list when using mounted volume
+        try:
+            if str(parent) == "/data":
+                print(f"[db] get_conn ls /data -> {os.listdir('/data')}")
+        except Exception as e:
+            print(f"[db] get_conn ls /data error: {e}")
+
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        print(f"[db] get_conn opened path={DB_PATH}")
+        return conn
+    except Exception as e:
+        print(f"[db] get_conn sqlite open error path={DB_PATH} err={e}")
+        raise
 
 
 def init_db() -> None:
