@@ -8,5 +8,3 @@ PyYAML
 tiktoken
 typing-extensions
 gunicorn
-
-# force rebuild
