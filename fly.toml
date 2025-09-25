@@ -10,7 +10,7 @@ primary_region = "iad"
 
 # Single process: Flask API; worker runs via API-triggered threads
 [processes]
-  app = "python api.py"
+  app = "gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:${PORT:-8080} api:app"
 
 [[services]]
   protocol = "tcp"
@@ -30,3 +30,8 @@ primary_region = "iad"
 [[mounts]]
   source = "data"
   destination = "/data"
+
+[vm]
+  memory = 512
+  cpus = 1
+  cpu_kind = "shared"

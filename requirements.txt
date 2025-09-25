@@ -7,3 +7,4 @@ python-dotenv
 PyYAML
 tiktoken
 typing-extensions
+gunicorn

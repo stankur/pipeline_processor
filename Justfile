@@ -77,8 +77,18 @@ help:
     @just --list
 
 # Docker Compose wrappers (avoid name clash with existing `start` recipe)
-compose-start:
-	docker compose up --build
+compose-start mem="":
+    docker compose up --build -d
+    @val="{{mem}}"; if [ -n "$val" ]; then \
+      echo "$val" | grep -Eq '^[0-9]+[mMgG]$' || { echo "Invalid mem value: '$val'. Use e.g. 256m or 1g."; exit 2; }; \
+      cid=$(docker compose ps -q api); \
+      if [ -z "$cid" ]; then echo "api not running"; exit 1; fi; \
+      docker update --memory "$val" --memory-swap "$val" "$cid"; \
+      echo "Applied memory cap $val to $cid"; \
+    fi
 
 compose-down:
 	docker compose down
+
+compose-stats:
+	@cid=$(docker compose ps -q api); if [ -z "$cid" ]; then echo "api not running"; exit 1; fi; docker stats "$cid"

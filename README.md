@@ -21,7 +21,7 @@ just check
 
 ## Running
 
-### Option 1: API Server (recommended)
+### Option 1: API Server (dev)
 
 ```bash
 # Start the API server
@@ -30,7 +30,24 @@ just serve
 # Server runs at http://localhost:5000
 ```
 
-### Option 2: Dagster UI (for debugging)
+### Option 2: Prod-like local run (gunicorn)
+
+```bash
+# Start prod-like server (gunicorn) with optional memory cap
+just compose-start            # no cap
+just compose-start 256m       # cap memory to 256 MiB
+
+# Watch live resource usage
+just compose-stats
+
+# Trigger work
+just restart user=<github-username>
+
+# Stop services
+just compose-down
+```
+
+### Option 3: Dagster UI (for debugging)
 
 ```bash
 # Start Dagster UI
