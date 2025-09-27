@@ -16,6 +16,7 @@ from db import (
     set_work_status,
     get_subject,
     get_user_repos,
+    get_work_item,
     upsert_user_repo_link,
 )
 from github_client import GitHubClient
@@ -26,17 +27,10 @@ from logging import getLogger
 logger = getLogger(__name__)
 
 
-def _unique_commit_days(commits: list[dict]) -> int:
-    days = set()
-    for c in commits:
-        try:
-            meta = c.get("commit", {})
-            date_str = meta.get("author", {}).get("date") or meta.get("committer", {}).get("date")
-            if date_str:
-                days.add(date_str.split("T")[0])
-        except Exception:
-            continue
-    return len(days)
+def _already_succeeded(conn, kind: str, subject_type: str, subject_id: str) -> bool:
+    row = get_work_item(conn, kind, subject_type, subject_id)
+    return bool(row and row["status"] == "succeeded")
+
 
 
 def _recent_enough(ts: str | None, years: int = 2) -> bool:
@@ -97,6 +91,8 @@ def fetch_profile(username: str) -> None:
     """
     print(f"[task] fetch_profile start username={username}")
     conn = get_conn()
+    if _already_succeeded(conn, "fetch_profile", "user", username):
+        return
     set_work_status(conn, "fetch_profile", "user", username, "running")
     client = GitHubClient()
     profile = client.get_user(username)
@@ -121,6 +117,8 @@ def fetch_repos(username: str) -> None:
     """Fetch and filter repositories for username; write only kept repos as lean subjects('repo','user/repo')."""
     print(f"[task] fetch_repos start username={username}")
     conn = get_conn()
+    if _already_succeeded(conn, "fetch_repos", "user", username):
+        return
     set_work_status(conn, "fetch_repos", "user", username, "running")
     client = GitHubClient()
 
@@ -321,6 +319,8 @@ def select_highlighted_repos(username: str) -> None:
     """
     print(f"[task] select_highlighted_repos start username={username}")
     conn = get_conn()
+    if _already_succeeded(conn, "select_highlighted_repos", "user", username):
+        return
     set_work_status(conn, "select_highlighted_repos", "user", username, "running")
 
     rows = get_user_repos(conn, username)
@@ -448,6 +448,8 @@ def infer_user_theme(username: str) -> None:
     """
     print(f"[task] infer_user_theme start username={username}")
     conn = get_conn()
+    if _already_succeeded(conn, "infer_user_theme", "user", username):
+        return
     set_work_status(conn, "infer_user_theme", "user", username, "running")
 
     # Read highlighted repos from previous task
@@ -545,6 +547,8 @@ def enhance_repo_media(repo_id: str) -> None:
     """
     print(f"[task] enhance_repo_media start repo={repo_id}")
     conn = get_conn()
+    if _already_succeeded(conn, "enhance_repo_media", "repo", repo_id):
+        return
     set_work_status(conn, "enhance_repo_media", "repo", repo_id, "running")
 
     try:
@@ -625,6 +629,8 @@ def generate_repo_blurb(repo_id: str) -> None:
     """
     print(f"[task] generate_repo_blurb start repo={repo_id}")
     conn = get_conn()
+    if _already_succeeded(conn, "generate_repo_blurb", "repo", repo_id):
+        return
     set_work_status(conn, "generate_repo_blurb", "repo", repo_id, "running")
 
     try:
@@ -684,6 +690,8 @@ def extract_repo_emphasis(repo_id: str) -> None:
     """
     print(f"[task] extract_repo_emphasis start repo={repo_id}")
     conn = get_conn()
+    if _already_succeeded(conn, "extract_repo_emphasis", "repo", repo_id):
+        return
     set_work_status(conn, "extract_repo_emphasis", "repo", repo_id, "running")
 
     # Load repo subject
@@ -787,6 +795,8 @@ def extract_repo_keywords(repo_id: str) -> None:
     """
     print(f"[task] extract_repo_keywords start repo={repo_id}")
     conn = get_conn()
+    if _already_succeeded(conn, "extract_repo_keywords", "repo", repo_id):
+        return
     set_work_status(conn, "extract_repo_keywords", "repo", repo_id, "running")
 
     # Load repo subject

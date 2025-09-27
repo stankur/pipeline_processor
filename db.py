@@ -212,6 +212,32 @@ def reset_user_work_items_to_pending(conn: sqlite3.Connection, username: str, ki
     print(f"[db] reset_work_items ok user={username}")
 
 
+def reset_user_repo_work_items_to_pending(conn: sqlite3.Connection, username: str, kinds: list[str]) -> None:
+    """Reset selected repo-scoped work_items to pending for all repos linked to username.
+
+    This targets work_items where subject_type='repo' and subject_id is in the user's current repo links.
+    """
+    print(f"[db] reset_repo_work_items user={username} kinds={kinds}")
+    if not kinds:
+        print(f"[db] reset_repo_work_items skipped (empty kinds) user={username}")
+        return
+    qmarks = ",".join(["?"] * len(kinds))
+    params = [*kinds, username]
+    conn.execute(
+        f"""
+        UPDATE work_items
+        SET status='pending', output_json=NULL, processed_at=NULL
+        WHERE kind IN ({qmarks})
+          AND subject_type='repo'
+          AND subject_id IN (
+                SELECT repo_id FROM user_repo_links WHERE username=?
+          )
+        """,
+        params,
+    )
+    print(f"[db] reset_repo_work_items ok user={username}")
+
+
 def delete_user_repo_subjects(conn: sqlite3.Connection, username: str) -> None:
     """Delete owned repo subjects for a user and clear all their repo links.
 

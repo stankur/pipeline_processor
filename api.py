@@ -12,6 +12,7 @@ from db import (
     get_user_repos,
     list_user_work_items,
     reset_user_work_items_to_pending,
+    reset_user_repo_work_items_to_pending,
     delete_user_repo_subjects,
 )
 from defs import all_assets
@@ -102,12 +103,14 @@ def start(username: str):
 
 @app.post("/users/<username>/restart")
 def restart(username: str):
-    """Force reset and rerun the full pipeline for a user."""
+    """Force reset and rerun the full pipeline for a user.
+
+    Clears user-owned repos and resets work items (user + repo scoped) to pending so tasks will rerun even with idempotent guards.
+    """
     print(f"[api] restart called username={username}")
     conn = get_conn()
 
-    # Clean up existing data
-    delete_user_repo_subjects(conn, username)
+    # Reset user-scoped work items
     reset_user_work_items_to_pending(
         conn,
         username,
@@ -116,15 +119,27 @@ def restart(username: str):
             "fetch_repos",
             "select_highlighted_repos",
             "infer_user_theme",
+        ],
+    )
+
+    # Reset repo-scoped work items for repos linked to this user
+    reset_user_repo_work_items_to_pending(
+        conn,
+        username,
+        [
             "enhance_repo_media",
             "generate_repo_blurb",
             "extract_repo_emphasis",
             "extract_repo_keywords",
         ],
     )
+
+    # Remove links and owned repo subjects (ensures fresh re-discovery)
+    delete_user_repo_subjects(conn, username)
+
     conn.commit()
 
-    # Run the worker
+    # Queue run
     _run_worker_async(username)
     print(f"[api] restart queued username={username}")
     return jsonify({"ok": True, "queued": True, "forced": True})
