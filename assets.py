@@ -128,7 +128,7 @@ def extract_repo_emphasis_asset(config: UserConfig) -> None:
         """
         SELECT w.subject_id
         FROM work_items w
-        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = ?
+        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
         WHERE w.kind = 'generate_repo_blurb'
           AND w.subject_type = 'repo'
           AND w.status = 'succeeded'
@@ -149,7 +149,7 @@ def extract_repo_keywords_asset(config: UserConfig) -> None:
         """
         SELECT w.subject_id
         FROM work_items w
-        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = ?
+        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
         WHERE w.kind = 'generate_repo_blurb'
           AND w.subject_type = 'repo'
           AND w.status = 'succeeded'

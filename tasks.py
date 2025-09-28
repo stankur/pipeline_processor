@@ -454,7 +454,7 @@ def infer_user_theme(username: str) -> None:
 
     # Read highlighted repos from previous task
     row = conn.execute(
-        "SELECT output_json FROM work_items WHERE kind='select_highlighted_repos' AND subject_type='user' AND subject_id=? AND status='succeeded'",
+        "SELECT output_json FROM work_items WHERE kind='select_highlighted_repos' AND subject_type='user' AND subject_id=%s AND status='succeeded'",
         (username,),
     ).fetchone()
     highlights: List[str] = []

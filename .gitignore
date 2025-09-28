@@ -49,3 +49,6 @@ sensor_logs/
 # Temporary files
 tmp/
 temp/
+
+#supabase
+supabase

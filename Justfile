@@ -32,10 +32,20 @@ run-selection user="stankur" selection="fetch_repos_asset,select_highlighted_rep
 init-db:
     .venv/bin/python -c "from db import init_db; init_db(); print('Database initialized successfully')"
 
-# Reset database (delete all data)
+# Supabase local (minimal)
+supa-init:
+    npx --yes supabase init
+
+supa-start:
+    npx --yes supabase start
+
+supa-stop:
+    npx --yes supabase stop
+
+
+# Reset database (Supabase Postgres)
 reset-db:
-    rm -f app.db
-    @echo "Database reset. Run 'just init-db' to recreate tables."
+    npx --yes supabase db reset --no-verify
 
 # Check if environment is set up correctly
 check:
@@ -92,3 +102,14 @@ compose-down:
 
 compose-stats:
 	@cid=$(docker compose ps -q api); if [ -z "$cid" ]; then echo "api not running"; exit 1; fi; docker stats "$cid"
+
+# Lightweight Postgres UI (pgweb) at http://localhost:8081
+db-ui:
+    @docker rm -f pgweb 2>/dev/null || true
+    docker run --rm --name pgweb -p 8081:8081 \
+      --add-host=host.docker.internal:host-gateway \
+      sosedoff/pgweb \
+      --url postgresql://postgres:postgres@host.docker.internal:54322/postgres?sslmode=disable
+
+db-ui-stop:
+    docker rm -f pgweb 2>/dev/null || true

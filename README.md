@@ -109,6 +109,16 @@ ls -la app.db
 just reset-db
 ```
 
+### Database UI (pgweb)
+
+```bash
+# Open a lightweight Postgres UI at http://localhost:8081
+just db-ui
+
+# Stop the UI container
+just db-ui-stop
+```
+
 ### Logs
 
 -   API logs: printed to console when running `just serve`
