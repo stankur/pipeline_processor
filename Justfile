@@ -82,6 +82,10 @@ progress user="stankur":
 data user="stankur":
     curl http://localhost:8080/users/{{user}}/data
 
+# Restart from a specific asset key (and downstream)
+restart-from user="stankur" start="generate_repo_blurb_asset":
+    curl -X POST "http://localhost:8080/users/{{user}}/restart-from?start={{start}}"
+
 # Show available commands
 help:
     @just --list

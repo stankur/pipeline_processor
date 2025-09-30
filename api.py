@@ -3,7 +3,7 @@ import os
 import threading
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from dagster import materialize
+from dagster import materialize, AssetSelection
 
 from db import (
     get_conn,
@@ -17,7 +17,7 @@ from db import (
     upsert_subject,
     upsert_user_repo_link,
 )
-from defs import all_assets
+from defs import all_assets, asset_graph, asset_meta
 
 
 app = Flask(__name__)
@@ -146,6 +146,65 @@ def restart(username: str):
     _run_worker_async(username)
     print(f"[api] restart queued username={username}")
     return jsonify({"ok": True, "queued": True, "forced": True})
+
+
+@app.post("/users/<username>/restart-from")
+def restart_from(username: str):
+    """Restart from a given asset key and downstream only, resetting just the relevant work-item kinds.
+
+    Query params:
+      - start: asset key string (e.g., 'generate_repo_blurb_asset')
+    """
+    start = (request.args.get("start") or "").strip()
+    if not start:
+        return jsonify({"ok": False, "error": "missing_start"}), 400
+    meta = asset_meta.get(start)
+    if not meta:
+        return jsonify({"ok": False, "error": "invalid_start"}), 400
+
+    # Compute downstream selection including start
+    selection = AssetSelection.keys(meta["key"]).downstream()
+    selected_keys = selection.resolve(asset_graph)
+    selected_names = [k.to_user_string() for k in selected_keys]
+
+    # Collect kinds to reset grouped by scope
+    user_kinds: set[str] = set()
+    repo_kinds: set[str] = set()
+    for name in selected_names:
+        m = asset_meta.get(name) or {}
+        kinds = m.get("kinds") or []
+        scope = m.get("scope")
+        if scope == "user":
+            user_kinds.update(kinds)
+        elif scope == "repo":
+            repo_kinds.update(kinds)
+
+    # Reset and materialize
+    conn = get_conn()
+    if user_kinds:
+        reset_user_work_items_to_pending(conn, username, sorted(user_kinds))
+    if repo_kinds:
+        reset_user_repo_work_items_to_pending(conn, username, sorted(repo_kinds))
+    conn.commit()
+
+    run_config = _build_run_config_for_username(username)
+    result = materialize(
+        assets=all_assets,
+        run_config=run_config,
+        selection=selection,
+        raise_on_error=False,
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "success": result.success,
+            "reset": {
+                "user_kinds": sorted(user_kinds),
+                "repo_kinds": sorted(repo_kinds),
+            },
+            "selection": selected_names,
+        }
+    )
 
 
 @app.get("/users/<username>/data")

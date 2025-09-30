@@ -24,31 +24,31 @@ from tasks import (
 class UserConfig(Config):
     username: str
 
-@asset
+@asset(metadata={"work_item_kinds": ["fetch_profile"], "scope": "user"})
 def fetch_profile_asset(config: UserConfig) -> None:
     """Fetch GitHub profile for the user."""
     fetch_profile(config.username)
 
 
-@asset
+@asset(metadata={"work_item_kinds": ["fetch_repos"], "scope": "user"})
 def fetch_repos_asset(config: UserConfig) -> None:
     """Fetch and filter repositories for the user."""
     fetch_repos(config.username)
 
 
-@asset(deps=[fetch_repos_asset])
+@asset(deps=[fetch_repos_asset], metadata={"work_item_kinds": ["select_highlighted_repos"], "scope": "user"})
 def select_highlighted_repos_asset(config: UserConfig) -> None:
     """Select highlighted repos - reads from DB, no data passing."""
     select_highlighted_repos(config.username)
 
 
-@asset(deps=[select_highlighted_repos_asset])
+@asset(deps=[select_highlighted_repos_asset], metadata={"work_item_kinds": ["infer_user_theme"], "scope": "user"})
 def infer_user_theme_asset(config: UserConfig) -> None:
     """Infer user theme based on highlighted repos - reads from DB."""
     infer_user_theme(config.username)
 
 
-@asset(deps=[select_highlighted_repos_asset])
+@asset(deps=[select_highlighted_repos_asset], metadata={"work_item_kinds": ["enhance_repo_media"], "scope": "repo"})
 def enhance_repo_media_asset(config: UserConfig) -> None:
     """Enhance media for each highlighted repo - reads highlighted repos from DB."""
     username = config.username
@@ -84,7 +84,7 @@ def enhance_repo_media_asset(config: UserConfig) -> None:
             enhance_repo_media(repo_id)
 
 
-@asset(deps=[select_highlighted_repos_asset])
+@asset(deps=[select_highlighted_repos_asset], metadata={"work_item_kinds": ["generate_repo_blurb"], "scope": "repo"})
 def generate_repo_blurb_asset(config: UserConfig) -> None:
     """Generate blurbs for each highlighted repo - reads highlighted repos from DB."""
     username = config.username
@@ -120,7 +120,7 @@ def generate_repo_blurb_asset(config: UserConfig) -> None:
             generate_repo_blurb(repo_id)
 
 
-@asset(deps=[generate_repo_blurb_asset])
+@asset(deps=[generate_repo_blurb_asset], metadata={"work_item_kinds": ["extract_repo_emphasis"], "scope": "repo"})
 def extract_repo_emphasis_asset(config: UserConfig) -> None:
     """Extract emphasis only for repos that successfully generated blurbs."""
     username = config.username
@@ -141,7 +141,7 @@ def extract_repo_emphasis_asset(config: UserConfig) -> None:
         extract_repo_emphasis(repo_id)
 
 
-@asset(deps=[generate_repo_blurb_asset])
+@asset(deps=[generate_repo_blurb_asset], metadata={"work_item_kinds": ["extract_repo_keywords"], "scope": "repo"})
 def extract_repo_keywords_asset(config: UserConfig) -> None:
     """Extract keywords only for repos that successfully generated blurbs."""
     username = config.username
@@ -162,7 +162,7 @@ def extract_repo_keywords_asset(config: UserConfig) -> None:
         extract_repo_keywords(repo_id)
 
 
-@asset(deps=[generate_repo_blurb_asset])
+@asset(deps=[generate_repo_blurb_asset], metadata={"work_item_kinds": ["extract_repo_kind"], "scope": "repo"})
 def extract_repo_kind_asset(config: UserConfig) -> None:
     """Extract a compact kind phrase only for repos that successfully generated blurbs."""
     username = config.username
