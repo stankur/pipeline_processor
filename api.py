@@ -14,6 +14,8 @@ from db import (
     reset_user_work_items_to_pending,
     reset_user_repo_work_items_to_pending,
     delete_user_repo_subjects,
+    upsert_subject,
+    upsert_user_repo_link,
 )
 from defs import all_assets
 
@@ -178,6 +180,157 @@ def progress(username: str):
         }
     )
 
+
+@app.post("/users/<username>/repos/<owner>/<repo>/gallery")
+def add_repo_gallery_images(username: str, owner: str, repo: str):
+    """Append one or more images to a repo's gallery, creating the subject if missing.
+
+    Body can be either a single image object or a batch:
+    - {"url": str, "alt": str, "original_url": str}
+    - {"images": [{...}], "dedupe": "url" | false, "link": bool}
+    """
+    repo_id = f"{owner}/{repo}"
+    data = request.get_json(silent=True) or {}
+
+    # Normalize input to a list of images
+    images = []
+    if isinstance(data.get("images"), list):
+        images = [img for img in data.get("images") if isinstance(img, dict)]
+    elif any(k in data for k in ("url", "alt", "original_url")):
+        images = [data]
+    else:
+        return jsonify({"ok": False, "error": "invalid_body"}), 400
+
+    # Build list to add with minimal validation
+    to_add = []
+    for img in images:
+        url = (img.get("url") or "").strip()
+        if not url:
+            continue
+        to_add.append({
+            "url": url,
+            "alt": (img.get("alt") or "").strip(),
+            "original_url": (img.get("original_url") or "").strip() or url,
+        })
+
+    if not to_add:
+        return jsonify({"ok": False, "error": "no_images"}), 400
+
+    dedupe_key = data.get("dedupe", "url")
+    link_flag = bool(data.get("link"))
+
+    conn = get_conn()
+
+    # Load existing repo subject (or initialize)
+    row = get_subject(conn, "repo", repo_id)
+    base = {}
+    if row and row.get("data_json"):
+        try:
+            import json as _json
+            base = _json.loads(row["data_json"]) or {}
+        except Exception:
+            base = {}
+
+    gallery = base.get("gallery")
+    if not isinstance(gallery, list):
+        gallery = []
+
+    # Build existing keys set for dedupe
+    existing_keys = set()
+    if dedupe_key is not False:
+        for it in gallery:
+            if isinstance(it, dict) and dedupe_key in it and isinstance(it.get(dedupe_key), str):
+                existing_keys.add(it.get(dedupe_key).strip())
+
+    added = 0
+    skipped = 0
+    for item in to_add:
+        key_val = item.get(dedupe_key).strip() if isinstance(dedupe_key, str) else None
+        if dedupe_key is not False and key_val in existing_keys:
+            skipped += 1
+            continue
+        gallery.append(item)
+        if dedupe_key is not False and isinstance(key_val, str):
+            existing_keys.add(key_val)
+        added += 1
+
+    base["gallery"] = gallery
+
+    # Persist subject
+    import json as _json
+    upsert_subject(conn, "repo", repo_id, _json.dumps(base))
+
+    # Optionally ensure link for user->repo
+    if link_flag:
+        try:
+            upsert_user_repo_link(conn, username, repo_id, "manual", None)
+        except Exception:
+            pass
+
+    conn.commit()
+
+    return jsonify({
+        "ok": True,
+        "repo_id": repo_id,
+        "added": added,
+        "skipped": skipped,
+        "gallery_count": len(gallery),
+    })
+
+
+@app.delete("/users/<username>/repos/<owner>/<repo>/gallery")
+def delete_repo_gallery_images(username: str, owner: str, repo: str):
+    """Remove images from a repo's gallery by URL.
+
+    Accepts either query params (?url=...&url=...) or JSON body {"urls": [..]} or {"url": "..."}.
+    """
+    repo_id = f"{owner}/{repo}"
+
+    urls = set([u.strip() for u in request.args.getlist("url") if isinstance(u, str) and u.strip()])
+    if not urls:
+        body = request.get_json(silent=True) or {}
+        if isinstance(body.get("urls"), list):
+            urls = set([str(u).strip() for u in body.get("urls") if str(u).strip()])
+        elif isinstance(body.get("url"), str) and body.get("url").strip():
+            urls = {body.get("url").strip()}
+
+    if not urls:
+        return jsonify({"ok": False, "error": "no_urls"}), 400
+
+    conn = get_conn()
+    row = get_subject(conn, "repo", repo_id)
+
+    import json as _json
+    base = {}
+    if row and row.get("data_json"):
+        try:
+            base = _json.loads(row["data_json"]) or {}
+        except Exception:
+            base = {}
+
+    gallery = base.get("gallery")
+    if not isinstance(gallery, list) or not gallery:
+        # Nothing to remove
+        return jsonify({"ok": True, "removed": 0, "gallery_count": 0})
+
+    new_gallery = []
+    removed = 0
+    for it in gallery:
+        try:
+            u = (it.get("url") or "").strip() if isinstance(it, dict) else ""
+        except Exception:
+            u = ""
+        if u and u in urls:
+            removed += 1
+            continue
+        new_gallery.append(it)
+
+    if removed > 0:
+        base["gallery"] = new_gallery
+        upsert_subject(conn, "repo", repo_id, _json.dumps(base))
+        conn.commit()
+
+    return jsonify({"ok": True, "removed": removed, "gallery_count": len(base.get("gallery", []))})
 
 @app.get("/healthz")
 def healthz():

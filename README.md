@@ -85,6 +85,43 @@ curl http://localhost:5000/users/stankur/progress
 curl http://localhost:5000/users/stankur/data
 ```
 
+### Repo gallery management
+
+Add or remove images on a repository's gallery (creates the repo subject if missing).
+
+Note: If `API_KEY` is set in the environment, include header `Authorization: Bearer <API_KEY>`.
+
+```bash
+# Add a single image (also link this repo to the user)
+curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "url": "https://example.com/screenshot.png",
+        "alt": "Landing page",
+        "original_url": "docs/images/shot.png",
+        "link": true
+      }'
+
+# Add multiple images with URL-based dedupe (default)
+curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "images": [
+          { "url": "https://example.com/a.png", "alt": "A" },
+          { "url": "https://example.com/b.png", "alt": "B" }
+        ],
+        "dedupe": "url"
+      }'
+
+# Delete by URL (query params)
+curl -X DELETE 'http://localhost:5000/users/alice/repos/octocat/hello-world/gallery?url=https://example.com/a.png&url=https://example.com/b.png'
+
+# Or delete by body
+curl -X DELETE http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+  -H 'Content-Type: application/json' \
+  -d '{ "urls": ["https://example.com/a.png", "https://example.com/b.png"] }'
+```
+
 ## Direct Pipeline Commands
 
 ```bash
