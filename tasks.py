@@ -899,3 +899,51 @@ def extract_repo_keywords(repo_id: str) -> None:
     conn.commit()
     print(f"[task] extract_repo_keywords done repo={repo_id} count={len(keywords_list)}")
 
+
+def extract_repo_kind(repo_id: str) -> None:
+    """Create a very short noun phrase kind from generated_description and store on repo subject.
+
+    Minimal: no enforcement, no JSON parsing, just save whatever the LLM returns (trimmed).
+    """
+    print(f"[task] extract_repo_kind start repo={repo_id}")
+    conn = get_conn()
+    if _already_succeeded(conn, "extract_repo_kind", "repo", repo_id):
+        return
+    set_work_status(conn, "extract_repo_kind", "repo", repo_id, "running")
+
+    # Load repo subject (best-effort, minimal)
+    row = get_subject(conn, "repo", repo_id)
+    base = {}
+    if row and row.get("data_json"):
+        try:
+            base = json.loads(row["data_json"]) or {}
+        except Exception:
+            base = {}
+
+    desc = base.get("generated_description") or ""
+
+    prompt = (
+        "in one single and simple 1-4 words phrase/noun phrase, can you say what this is (eg. new aggregator, functional programming language, data workflow orchestration)? use simple and understandable terms Just the answer please\n\n"
+        f"{desc}"
+    )
+
+    try:
+        text = _openrouter_chat(prompt)
+    except Exception:
+        text = ""
+
+    phrase = (text or "").strip()
+
+    # Persist and mark success (even if empty; minimal enforcement requested)
+    base["kind"] = phrase
+    upsert_subject(conn, "repo", repo_id, json.dumps(base))
+    set_work_status(
+        conn,
+        "extract_repo_kind",
+        "repo",
+        repo_id,
+        "succeeded",
+        json.dumps({"kind": phrase}),
+    )
+    conn.commit()
+    print(f"[task] extract_repo_kind done repo={repo_id} kind_len={len(phrase)}")

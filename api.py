@@ -133,6 +133,7 @@ def restart(username: str):
             "generate_repo_blurb",
             "extract_repo_emphasis",
             "extract_repo_keywords",
+                "extract_repo_kind",
         ],
     )
 

@@ -18,6 +18,7 @@ from tasks import (
     generate_repo_blurb,
     extract_repo_emphasis,
     extract_repo_keywords,
+    extract_repo_kind,
 )
 
 class UserConfig(Config):
@@ -159,3 +160,24 @@ def extract_repo_keywords_asset(config: UserConfig) -> None:
     for row in rows:
         repo_id = row["subject_id"]
         extract_repo_keywords(repo_id)
+
+
+@asset(deps=[generate_repo_blurb_asset])
+def extract_repo_kind_asset(config: UserConfig) -> None:
+    """Extract a compact kind phrase only for repos that successfully generated blurbs."""
+    username = config.username
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT w.subject_id
+        FROM work_items w
+        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
+        WHERE w.kind = 'generate_repo_blurb'
+          AND w.subject_type = 'repo'
+          AND w.status = 'succeeded'
+        """,
+        (username,),
+    ).fetchall()
+    for row in rows:
+        repo_id = row["subject_id"]
+        extract_repo_kind(repo_id)

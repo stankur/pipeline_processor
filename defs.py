@@ -12,6 +12,7 @@ from assets import (
     generate_repo_blurb_asset,
     extract_repo_emphasis_asset,
     extract_repo_keywords_asset,
+    extract_repo_kind_asset,
 )
 
 # All assets already have partitions defined
@@ -24,6 +25,7 @@ all_assets = [
     generate_repo_blurb_asset,
     extract_repo_emphasis_asset,
     extract_repo_keywords_asset,
+    extract_repo_kind_asset,
 ]
 
 defs = Definitions(
