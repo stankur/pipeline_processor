@@ -425,6 +425,114 @@ def delete_repo_gallery_images(username: str, owner: str, repo: str):
 
     return jsonify({"ok": True, "removed": removed, "gallery_count": len(base.get("gallery", []))})
 
+@app.get("/users/<username>/repos/<owner>/<repo>/gallery")
+def get_repo_gallery(username: str, owner: str, repo: str):
+    """Get all images in a repository's gallery.
+    
+    Returns the gallery as an array of image objects.
+    """
+    repo_id = f"{owner}/{repo}"
+    conn = get_conn()
+    row = get_subject(conn, "repo", repo_id)
+    
+    if not row or not row.get("data_json"):
+        return jsonify({"gallery": []})
+    
+    try:
+        data = json.loads(row["data_json"])
+        gallery = data.get("gallery", [])
+        return jsonify({"gallery": gallery})
+    except Exception:
+        return jsonify({"gallery": []})
+
+@app.patch("/users/<username>/repos/<owner>/<repo>/gallery")
+def update_repo_gallery_image(username: str, owner: str, repo: str):
+    """Update fields of a single gallery image identified by URL.
+
+    Body:
+      - {"url": string, ...fields}
+
+    Updatable fields: title, caption, is_highlight, alt, original_url, taken_at
+    Returns: { ok: bool, updated: int }
+    """
+    repo_id = f"{owner}/{repo}"
+    body = request.get_json(silent=True) or {}
+    url = (body.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "missing_url"}), 400
+
+    # Normalize and validate updatable fields
+    updatable = {}
+    if "title" in body:
+        updatable["title"] = (body.get("title") or "").strip()
+    if "caption" in body:
+        updatable["caption"] = (body.get("caption") or "").strip()
+    if "alt" in body:
+        updatable["alt"] = (body.get("alt") or "").strip()
+    if "original_url" in body:
+        updatable["original_url"] = (body.get("original_url") or "").strip()
+    if "is_highlight" in body:
+        ih = body.get("is_highlight")
+        if isinstance(ih, (bool, int)):
+            updatable["is_highlight"] = bool(ih)
+    if "taken_at" in body:
+        t = body.get("taken_at")
+        if isinstance(t, (int, float)):
+            try:
+                updatable["taken_at"] = int(t)
+            except Exception:
+                pass
+        elif isinstance(t, str) and t.strip():
+            s = t.strip()
+            try:
+                if s.isdigit():
+                    updatable["taken_at"] = int(s)
+                else:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    updatable["taken_at"] = int(dt.timestamp() * 1000)
+            except Exception:
+                pass
+
+    if not updatable:
+        return jsonify({"ok": False, "error": "no_fields"}), 400
+
+    conn = get_conn()
+    row = get_subject(conn, "repo", repo_id)
+    base = {}
+    if row and row.get("data_json"):
+        try:
+            base = json.loads(row["data_json"]) or {}
+        except Exception:
+            base = {}
+
+    gallery = base.get("gallery")
+    if not isinstance(gallery, list) or not gallery:
+        return jsonify({"ok": True, "updated": 0})
+
+    updated = 0
+    for it in gallery:
+        try:
+            u = (it.get("url") or "").strip() if isinstance(it, dict) else ""
+        except Exception:
+            u = ""
+        if u == url:
+            # Update whitelisted fields only
+            for k, v in updatable.items():
+                it[k] = v
+            updated += 1
+            break
+
+    if updated:
+        try:
+            import json as _json
+            base["gallery"] = gallery
+            upsert_subject(conn, "repo", repo_id, _json.dumps(base))
+            conn.commit()
+        except Exception:
+            pass
+
+    return jsonify({"ok": True, "updated": updated})
+
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True})

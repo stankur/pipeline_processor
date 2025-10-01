@@ -124,6 +124,15 @@ curl -X DELETE 'http://localhost:5000/users/alice/repos/octocat/hello-world/gall
 curl -X DELETE http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
   -H 'Content-Type: application/json' \
   -d '{ "urls": ["https://example.com/a.png", "https://example.com/b.png"] }'
+
+# Update fields of an existing image by URL (PATCH)
+curl -X PATCH http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "url": "https://example.com/b.png",
+        "is_highlight": false,
+        "title": "New title"
+      }'
 ```
 
 ## Direct Pipeline Commands
