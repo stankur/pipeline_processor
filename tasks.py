@@ -589,7 +589,7 @@ def enhance_repo_media(repo_id: str) -> None:
     # Gallery: simple markdown image extractor
     import re
 
-    gallery: List[Dict[str, str]] = []
+    gallery: List[Dict[str, Any]] = []
     if readme_content:
         pattern = r"!\[([^\]]*)\]\(([^)]+)\)"
         for match in re.findall(pattern, readme_content):
@@ -602,7 +602,15 @@ def enhance_repo_media(repo_id: str) -> None:
             # Normalize to absolute raw URL when relative
             if not (u.startswith("http://") or u.startswith("https://")):
                 u = f"https://github.com/{owner}/{name}/raw/{default_branch}/{u.lstrip('./').lstrip('/')}"
-            gallery.append({"alt": alt_text.strip(), "url": u, "original_url": url})
+            # Add minimal new fields with defaults
+            taken_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+            gallery.append({
+                "alt": alt_text.strip(),
+                "url": u,
+                "original_url": url,
+                "taken_at": taken_at,
+                "is_highlight": True,
+            })
 
     # Merge into repo subject
     row = get_subject(conn, "repo", repo_id)
@@ -613,10 +621,31 @@ def enhance_repo_media(repo_id: str) -> None:
         except Exception:
             base = {}
     base["link"] = link
-    base["gallery"] = gallery
+    # Merge with existing gallery if present, dedupe by URL
+    existing_gallery = base.get("gallery")
+    if not isinstance(existing_gallery, list):
+        existing_gallery = []
+
+    existing_urls: set[str] = set()
+    for item in existing_gallery:
+        if isinstance(item, dict):
+            url = (item.get("url") or "").strip()
+            if url:
+                existing_urls.add(url)
+
+    num_added = 0
+    for item in gallery:
+        url = (item.get("url") or "").strip()
+        if not url or url in existing_urls:
+            continue
+        existing_gallery.append(item)
+        existing_urls.add(url)
+        num_added += 1
+
+    base["gallery"] = existing_gallery
     upsert_subject(conn, "repo", repo_id, json.dumps(base))
 
-    set_work_status(conn, "enhance_repo_media", "repo", repo_id, "succeeded", json.dumps({"link": link, "gallery_count": len(gallery)}))
+    set_work_status(conn, "enhance_repo_media", "repo", repo_id, "succeeded", json.dumps({"link": link, "gallery_count": len(base.get("gallery", [])), "added": num_added}))
     conn.commit()
     print(f"[task] enhance_repo_media done repo={repo_id} link={bool(link)} gallery={len(gallery)}")
 

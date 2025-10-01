@@ -99,16 +99,20 @@ curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery
         "url": "https://example.com/screenshot.png",
         "alt": "Landing page",
         "original_url": "docs/images/shot.png",
+        "title": "Build success",
+        "caption": "First green pipeline",
+        "is_highlight": true,
+        "taken_at": 1758888612000,
         "link": true
       }'
 
-# Add multiple images with URL-based dedupe (default)
+# Add multiple images with URL-based dedupe (default). Optional per-item: title, caption, is_highlight, taken_at (epoch ms; defaults to now)
 curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
   -H 'Content-Type: application/json' \
   -d '{
         "images": [
-          { "url": "https://example.com/a.png", "alt": "A" },
-          { "url": "https://example.com/b.png", "alt": "B" }
+          { "url": "https://example.com/a.png", "alt": "A", "taken_at": 1758794400000 },
+          { "url": "https://example.com/b.png", "alt": "B", "is_highlight": true }
         ],
         "dedupe": "url"
       }'

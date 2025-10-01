@@ -1,7 +1,7 @@
 """
 Dagster definitions for the worker pipeline.
 """
-from dagster import Definitions, AssetGraph
+from dagster import Definitions
 
 from assets import (
     fetch_profile_asset,
@@ -32,12 +32,12 @@ defs = Definitions(
     assets=all_assets,
 )
 
-# Export graph and asset metadata for programmatic restarts
-asset_graph = AssetGraph.from_assets(all_assets)
+# Export asset metadata for programmatic restarts (no AssetGraph dependency)
+# Use metadata_by_key since AssetsDefinition has no direct `metadata` attribute
 asset_meta = {
     a.key.to_user_string(): {
-        "kinds": list(a.metadata.get("work_item_kinds", [])),
-        "scope": a.metadata.get("scope"),
+        "kinds": list((a.metadata_by_key.get(a.key) or {}).get("work_item_kinds", [])),
+        "scope": (a.metadata_by_key.get(a.key) or {}).get("scope"),
         "key": a.key,
     }
     for a in all_assets

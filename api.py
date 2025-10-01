@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import os
 import threading
 from flask import Flask, jsonify, request
@@ -17,7 +18,7 @@ from db import (
     upsert_subject,
     upsert_user_repo_link,
 )
-from defs import all_assets, asset_graph, asset_meta
+from defs import all_assets, asset_meta, defs as dag_defs
 
 
 app = Flask(__name__)
@@ -164,7 +165,7 @@ def restart_from(username: str):
 
     # Compute downstream selection including start
     selection = AssetSelection.keys(meta["key"]).downstream()
-    selected_keys = selection.resolve(asset_graph)
+    selected_keys = selection.resolve(dag_defs)
     selected_names = [k.to_user_string() for k in selected_keys]
 
     # Collect kinds to reset grouped by scope
@@ -267,10 +268,42 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
         url = (img.get("url") or "").strip()
         if not url:
             continue
+        # Optional fields with defaults
+        title = (img.get("title") or "").strip()
+        caption = (img.get("caption") or "").strip()
+        is_highlight = bool(img.get("is_highlight")) if isinstance(img.get("is_highlight"), (bool, int)) else False
+
+        # taken_at as epoch milliseconds (number). Accept numeric, or parse ISO/date-like string; default to now.
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        taken_at_val = img.get("taken_at")
+        taken_at: int
+        if isinstance(taken_at_val, (int, float)):
+            try:
+                taken_at = int(taken_at_val)
+            except Exception:
+                taken_at = now_ms
+        elif isinstance(taken_at_val, str) and taken_at_val.strip():
+            s = taken_at_val.strip()
+            try:
+                # Try numeric string first
+                if s.isdigit():
+                    taken_at = int(s)
+                else:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    taken_at = int(dt.timestamp() * 1000)
+            except Exception:
+                taken_at = now_ms
+        else:
+            taken_at = now_ms
+
         to_add.append({
             "url": url,
             "alt": (img.get("alt") or "").strip(),
             "original_url": (img.get("original_url") or "").strip() or url,
+            "title": title,
+            "caption": caption,
+            "is_highlight": is_highlight,
+            "taken_at": taken_at,
         })
 
     if not to_add:

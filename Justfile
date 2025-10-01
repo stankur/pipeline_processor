@@ -117,3 +117,10 @@ db-ui:
 
 db-ui-stop:
     docker rm -f pgweb 2>/dev/null || true
+
+# Type checking with BasedPyright
+typecheck:
+    npx --yes basedpyright
+
+typecheck-errors:
+    npx --yes basedpyright --level error
