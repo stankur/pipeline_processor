@@ -242,6 +242,100 @@ def progress(username: str):
     )
 
 
+@app.get("/for-you/<viewer_username>")
+def for_you(viewer_username: str):
+    """Return a simple For You feed built from user-subject highlights.
+
+    Implementation details (mock, non-personalized):
+      - Read ONLY user subjects where data_json.highlighted_repos is a non-empty list.
+      - For each such user, resolve highlighted names to that user's repos via get_user_repos.
+      - If multiple repos share the same name for a user, select by:
+          1) highest user_commit_days (None treated as -1)
+          2) if tied, prefer external original (owner != username)
+          3) if still tied, newest subjects.updated_at
+      - Flatten across users and sort by subjects.updated_at desc.
+      - Each repo object is EXACTLY the stored repo subject JSON, plus an added "username" field.
+    """
+    conn = get_conn()
+
+    # Discover users with highlighted_repos on their user subject
+    user_rows = conn.execute(
+        "SELECT subject_id, data_json FROM subjects WHERE subject_type='user'"
+    ).fetchall()
+
+    user_to_highlight_names: dict[str, list[str]] = {}
+    for row in user_rows:
+        try:
+            data = json.loads(row["data_json"]) if row.get("data_json") else None
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            continue
+        hl = data.get("highlighted_repos")
+        if isinstance(hl, list) and any(isinstance(n, str) and n.strip() for n in hl):
+            username = str(row.get("subject_id") or "").strip()
+            if not username:
+                continue
+            names = [str(n).strip() for n in hl if isinstance(n, str) and str(n).strip()]
+            if names:
+                user_to_highlight_names[username] = names
+
+    # Build feed
+    feed: list[tuple[float, dict]] = []  # (subjects.updated_at, repo_json_with_username)
+
+    for username, names in user_to_highlight_names.items():
+        repo_rows = get_user_repos(conn, username)
+
+        # Index candidate repos by bare name
+        name_to_candidates: dict[str, list[dict]] = {}
+        for r in repo_rows:
+            data_json = r.get("data_json")
+            if not data_json:
+                continue
+            try:
+                obj = json.loads(data_json)
+            except Exception:
+                continue
+            repo_name = obj.get("name")
+            if not isinstance(repo_name, str) or not repo_name:
+                continue
+            # Stash parsed object alongside the row for selection
+            name_to_candidates.setdefault(repo_name, []).append({
+                "obj": obj,
+                "row": r,
+            })
+
+        for repo_name in names:
+            candidates = name_to_candidates.get(repo_name)
+            if not candidates:
+                continue
+
+            def _selection_key(cand: dict) -> tuple:
+                r = cand["row"]
+                subj_id = r.get("subject_id") or ""
+                owner = subj_id.split("/", 1)[0] if "/" in subj_id else ""
+                # Primary: user_commit_days (None -> -1)
+                days = r.get("user_commit_days")
+                days_val = days if isinstance(days, int) else -1
+                # Secondary: prefer external original (owner != username) -> rank 1,
+                #            owned (owner == username) -> rank 0; we want external preferred, so external=1.
+                external_flag = 1 if owner != username else 0
+                # Tertiary: newer updated_at
+                upd = r.get("updated_at") or 0
+                return (days_val, external_flag, upd)
+
+            best = max(candidates, key=_selection_key)
+            obj = dict(best["obj"])  # copy to avoid mutating cached
+            obj["username"] = username
+            upd = best["row"].get("updated_at") or 0
+            feed.append((upd, obj))
+
+    # Sort by subjects.updated_at descending
+    feed.sort(key=lambda t: t[0], reverse=True)
+    repos = [it[1] for it in feed]
+    return jsonify({"repos": repos})
+
+
 @app.post("/users/<username>/repos/<owner>/<repo>/gallery")
 def add_repo_gallery_images(username: str, owner: str, repo: str):
     """Append one or more images to a repo's gallery, creating the subject if missing.

@@ -85,6 +85,16 @@ curl http://localhost:5000/users/stankur/progress
 curl http://localhost:5000/users/stankur/data
 ```
 
+### For You feed (mock, non-personalized)
+
+```bash
+curl http://localhost:5000/for-you/<viewer_username>
+```
+
+-   Returns a feed built from all users' `highlighted_repos`.
+-   Each item is the exact repo JSON stored in subjects (same as `/users/<username>/data`), plus a `username` field indicating whose highlight list it came from.
+-   Sorted by repo subject `updated_at` descending. No pagination/limits (for now).
+
 ### Repo gallery management
 
 Add or remove images on a repository's gallery (creates the repo subject if missing).
