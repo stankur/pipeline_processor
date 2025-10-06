@@ -27,7 +27,7 @@ just check
 # Start the API server
 just serve
 
-# Server runs at http://localhost:5000
+# Server runs at http://localhost:8080
 ```
 
 ### Option 2: Prod-like local run (gunicorn)
@@ -62,33 +62,33 @@ just dev
 
 ```bash
 # Works with any GitHub username
-curl -X POST http://localhost:5000/users/stankur/start
-curl -X POST http://localhost:5000/users/octocat/start
-curl -X POST http://localhost:5000/users/torvalds/start
+curl -X POST http://localhost:8080/users/stankur/start
+curl -X POST http://localhost:8080/users/octocat/start
+curl -X POST http://localhost:8080/users/torvalds/start
 ```
 
 ### Force restart (clears data and reruns)
 
 ```bash
-curl -X POST http://localhost:5000/users/stankur/restart
+curl -X POST http://localhost:8080/users/stankur/restart
 ```
 
 ### Check progress
 
 ```bash
-curl http://localhost:5000/users/stankur/progress
+curl http://localhost:8080/users/stankur/progress
 ```
 
 ### Get final data
 
 ```bash
-curl http://localhost:5000/users/stankur/data
+curl http://localhost:8080/users/stankur/data
 ```
 
 ### For You feed (mock, non-personalized)
 
 ```bash
-curl http://localhost:5000/for-you/<viewer_username>
+curl http://localhost:8080/for-you/<viewer_username>
 ```
 
 -   Returns a feed built from all users' `highlighted_repos`.
@@ -103,7 +103,7 @@ Note: If `API_KEY` is set in the environment, include header `Authorization: Bea
 
 ```bash
 # Add a single image (also link this repo to the user)
-curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+curl -X POST http://localhost:8080/users/alice/repos/octocat/hello-world/gallery \
   -H 'Content-Type: application/json' \
   -d '{
         "url": "https://example.com/screenshot.png",
@@ -117,7 +117,7 @@ curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery
       }'
 
 # Add multiple images with URL-based dedupe (default). Optional per-item: title, caption, is_highlight, taken_at (epoch ms; defaults to now)
-curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+curl -X POST http://localhost:8080/users/alice/repos/octocat/hello-world/gallery \
   -H 'Content-Type: application/json' \
   -d '{
         "images": [
@@ -128,15 +128,15 @@ curl -X POST http://localhost:5000/users/alice/repos/octocat/hello-world/gallery
       }'
 
 # Delete by URL (query params)
-curl -X DELETE 'http://localhost:5000/users/alice/repos/octocat/hello-world/gallery?url=https://example.com/a.png&url=https://example.com/b.png'
+curl -X DELETE 'http://localhost:8080/users/alice/repos/octocat/hello-world/gallery?url=https://example.com/a.png&url=https://example.com/b.png'
 
 # Or delete by body
-curl -X DELETE http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+curl -X DELETE http://localhost:8080/users/alice/repos/octocat/hello-world/gallery \
   -H 'Content-Type: application/json' \
   -d '{ "urls": ["https://example.com/a.png", "https://example.com/b.png"] }'
 
 # Update fields of an existing image by URL (PATCH)
-curl -X PATCH http://localhost:5000/users/alice/repos/octocat/hello-world/gallery \
+curl -X PATCH http://localhost:8080/users/alice/repos/octocat/hello-world/gallery \
   -H 'Content-Type: application/json' \
   -d '{
         "url": "https://example.com/b.png",

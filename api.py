@@ -332,7 +332,18 @@ def for_you(viewer_username: str):
 
     # Sort by subjects.updated_at descending
     feed.sort(key=lambda t: t[0], reverse=True)
-    repos = [it[1] for it in feed]
+
+    # Deduplicate by canonical repo id (owner/repo), keep the first (most recent)
+    seen: set[str] = set()
+    repos: list[dict] = []
+    for _, obj in feed:
+        rid = obj.get("id") if isinstance(obj, dict) else None
+        if not isinstance(rid, str) or not rid:
+            continue
+        if rid in seen:
+            continue
+        seen.add(rid)
+        repos.append(obj)
     return jsonify({"repos": repos})
 
 
