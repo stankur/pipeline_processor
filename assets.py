@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from dagster import asset, Config
 
-from db import get_conn, get_work_item
+from db import get_conn, get_work_item, get_user_repos
 from tasks import (
     fetch_profile,
     fetch_repos,
@@ -65,7 +65,6 @@ def enhance_repo_media_asset(config: UserConfig) -> None:
             pass
     
     # Get repo IDs from highlighted repos (need to convert names to full IDs)
-    from db import get_user_repos
     user_repos = get_user_repos(conn, username)
     repo_by_name = {}
     for repo_row in user_repos:
@@ -101,7 +100,6 @@ def generate_repo_blurb_asset(config: UserConfig) -> None:
             pass
     
     # Get repo IDs from highlighted repos (need to convert names to full IDs)
-    from db import get_user_repos
     user_repos = get_user_repos(conn, username)
     repo_by_name = {}
     for repo_row in user_repos:

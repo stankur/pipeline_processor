@@ -2,6 +2,7 @@ import time
 import os
 from psycopg import connect, Connection, Error
 from psycopg.rows import dict_row
+from models import UserSubject, RepoSubject
 
 
 def get_conn() -> Connection:
@@ -277,3 +278,74 @@ def delete_user_repo_links(conn: Connection, username: str) -> None:
         (username,),
     )
     print(f"[db] delete_user_repo_links ok user={username}")
+
+
+# -------------------- Pydantic-based helpers --------------------
+
+
+def upsert_user_subject(conn: Connection, username: str, user_model: UserSubject) -> None:
+    """Insert or update a user subject using a validated Pydantic model.
+    
+    Args:
+        conn: Database connection
+        username: GitHub username (subject_id)
+        user_model: UserSubject Pydantic model instance
+    """
+    if not isinstance(user_model, UserSubject):
+        raise TypeError(f"Expected UserSubject, got {type(user_model)}")
+    json_str = user_model.model_dump_json(exclude_none=False)
+    upsert_subject(conn, "user", username, json_str)
+
+
+def upsert_repo_subject(conn: Connection, repo_id: str, repo_model: RepoSubject) -> None:
+    """Insert or update a repo subject using a validated Pydantic model.
+    
+    Args:
+        conn: Database connection
+        repo_id: Repository full name "owner/repo" (subject_id)
+        repo_model: RepoSubject Pydantic model instance
+    """
+    if not isinstance(repo_model, RepoSubject):
+        raise TypeError(f"Expected RepoSubject, got {type(repo_model)}")
+    json_str = repo_model.model_dump_json(exclude_none=False)
+    upsert_subject(conn, "repo", repo_id, json_str)
+
+
+def get_user_subject(conn: Connection, username: str) -> UserSubject | None:
+    """Fetch and validate a user subject as a Pydantic model.
+    
+    Args:
+        conn: Database connection
+        username: GitHub username (subject_id)
+        
+    Returns:
+        UserSubject instance or None if not found or invalid
+    """
+    row = get_subject(conn, "user", username)
+    if not row or not row.get("data_json"):
+        return None
+    try:
+        return UserSubject.model_validate_json(row["data_json"])
+    except Exception as e:
+        print(f"[db] get_user_subject validation error user={username} err={e}")
+        return None
+
+
+def get_repo_subject(conn: Connection, repo_id: str) -> RepoSubject | None:
+    """Fetch and validate a repo subject as a Pydantic model.
+    
+    Args:
+        conn: Database connection
+        repo_id: Repository full name "owner/repo" (subject_id)
+        
+    Returns:
+        RepoSubject instance or None if not found or invalid
+    """
+    row = get_subject(conn, "repo", repo_id)
+    if not row or not row.get("data_json"):
+        return None
+    try:
+        return RepoSubject.model_validate_json(row["data_json"])
+    except Exception as e:
+        print(f"[db] get_repo_subject validation error repo={repo_id} err={e}")
+        return None

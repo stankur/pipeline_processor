@@ -18,9 +18,26 @@ from db import (
     get_user_repos,
     get_work_item,
     upsert_user_repo_link,
+    upsert_user_subject,
+    upsert_repo_subject,
+    get_user_subject,
+    get_repo_subject,
 )
 from github_client import GitHubClient
 from utils import parse_llm_json
+from models import (
+    UserSubject,
+    RepoSubject,
+    GalleryImage,
+    FetchProfileOutput,
+    FetchReposOutput,
+    InferUserThemeOutput,
+    EnhanceRepoMediaOutput,
+    GenerateRepoBlurbOutput,
+    ExtractRepoEmphasisOutput,
+    ExtractRepoKeywordsOutput,
+    ExtractRepoKindOutput,
+)
 
 from logging import getLogger
 
@@ -97,17 +114,20 @@ def fetch_profile(username: str) -> None:
     client = GitHubClient()
     profile = client.get_user(username)
     print(f"[task] fetch_profile got profile login={profile.get('login')}")
-    # Keep only lean profile fields
-    lean = {
-        "login": profile.get("login"),
-        "avatar_url": profile.get("avatar_url"),
-        "bio": profile.get("bio"),
-        "location": profile.get("location"),
-        "blog": profile.get("blog"),
-    }
-    upsert_subject(conn, "user", username, json.dumps(lean))
+    
+    # Create validated user subject
+    user = UserSubject(
+        login=profile.get("login") or username,
+        avatar_url=profile.get("avatar_url"),
+        bio=profile.get("bio"),
+        location=profile.get("location"),
+        blog=profile.get("blog"),
+    )
+    upsert_user_subject(conn, username, user)
     print(f"[task] fetch_profile upserted username={username}")
-    set_work_status(conn, "fetch_profile", "user", username, "succeeded", json.dumps({"profile_found": True}))
+    
+    output = FetchProfileOutput(profile_found=True)
+    set_work_status(conn, "fetch_profile", "user", username, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] fetch_profile commit username={username}")
     print(f"[task] fetch_profile done username={username}")
@@ -141,18 +161,18 @@ def fetch_repos(username: str) -> None:
             continue
         is_fork = bool(repo.get("fork"))
 
-        # Build lean subject payload
-        subject = {
-            "id": full_name,
-            "name": name,
-            "description": repo.get("description"),
-            "language": repo.get("language"),
-            "stargazers_count": repo.get("stargazers_count", 0),
-            "fork": is_fork,
-            "pushed_at": repo.get("pushed_at"),
-            "updated_at": repo.get("updated_at"),
-            "topics": repo.get("topics", []),
-        }
+        # Build validated repo subject
+        repo_subject = RepoSubject(
+            id=full_name,
+            name=name or "",
+            description=repo.get("description"),
+            language=repo.get("language"),
+            stargazers_count=repo.get("stargazers_count", 0),
+            fork=is_fork,
+            pushed_at=repo.get("pushed_at"),
+            updated_at=repo.get("updated_at"),
+            topics=repo.get("topics", []),
+        )
 
         include_reason: str | None = None
         user_commit_days: int | None = None
@@ -167,8 +187,8 @@ def fetch_repos(username: str) -> None:
                 include_reason = "fork_active"
 
         if include_reason:
-            kept_subjects.append(subject)
-            upsert_subject(conn, "repo", full_name, json.dumps(subject))
+            kept_subjects.append(repo_subject.model_dump())
+            upsert_repo_subject(conn, full_name, repo_subject)
             upsert_user_repo_link(conn, username, full_name, include_reason, user_commit_days)
 
     print(f"[task] fetch_repos kept owned+forks count={len(kept_subjects)}")
@@ -242,23 +262,25 @@ def fetch_repos(username: str) -> None:
         days = _count_author_unique_commit_days(client, owner, name, username)
         if days < ACTIVITY_DAYS_THRESHOLD:
             continue
-        subject = {
-            "id": full_name,
-            "name": name,
-            "description": meta.get("description"),
-            "language": language,
-            "stargazers_count": meta.get("stargazers_count", 0),
-            "fork": bool(meta.get("fork")),
-            "pushed_at": meta.get("pushed_at"),
-            "updated_at": meta.get("updated_at"),
-            "topics": meta.get("topics", []),
-        }
-        upsert_subject(conn, "repo", full_name, json.dumps(subject))
+        
+        repo_subject = RepoSubject(
+            id=full_name,
+            name=name,
+            description=meta.get("description"),
+            language=language,
+            stargazers_count=meta.get("stargazers_count", 0),
+            fork=bool(meta.get("fork")),
+            pushed_at=meta.get("pushed_at"),
+            updated_at=meta.get("updated_at"),
+            topics=meta.get("topics", []),
+        )
+        upsert_repo_subject(conn, full_name, repo_subject)
         upsert_user_repo_link(conn, username, full_name, "contributed", days)
-        kept_subjects.append(subject)
+        kept_subjects.append(repo_subject.model_dump())
         seen_ids.add(full_name)
 
-    set_work_status(conn, "fetch_repos", "user", username, "succeeded", json.dumps({"fetched": len(kept_subjects)}))
+    output = FetchReposOutput(fetched=len(kept_subjects))
+    set_work_status(conn, "fetch_repos", "user", username, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] fetch_repos commit username={username}")
     print(f"[task] fetch_repos done username={username} kept={len(kept_subjects)}")
@@ -523,19 +545,18 @@ def infer_user_theme(username: str) -> None:
             print(f"[task] infer_user_theme token count too high: {count_tokens(full_prompt)} >= 5000")
 
     # Persist into user subject
-    urow = get_subject(conn, "user", username)
-    ubase = {}
-    if urow and urow["data_json"]:
-        try:
-            ubase = json.loads(urow["data_json"]) or {}
-        except Exception:
-            ubase = {}
-    ubase["theme"] = theme
-    ubase["highlighted_repos"] = highlights
-    upsert_subject(conn, "user", username, json.dumps(ubase))
+    user = get_user_subject(conn, username)
+    if not user:
+        # Shouldn't happen since fetch_profile runs first, but handle gracefully
+        user = UserSubject(login=username)
+    
+    user.theme = theme
+    user.highlighted_repos = highlights
+    upsert_user_subject(conn, username, user)
 
     print(f"[task] infer_user_theme parsed theme_len={len(theme)} theme={theme}")
-    set_work_status(conn, "infer_user_theme", "user", username, "succeeded", json.dumps({"theme": theme}))
+    output = InferUserThemeOutput(theme=theme)
+    set_work_status(conn, "infer_user_theme", "user", username, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] infer_user_theme done username={username} theme_len={len(theme)} highlights={len(highlights)}")
 
@@ -613,39 +634,30 @@ def enhance_repo_media(repo_id: str) -> None:
             })
 
     # Merge into repo subject
-    row = get_subject(conn, "repo", repo_id)
-    base = {}
-    if row and row["data_json"]:
-        try:
-            base = json.loads(row["data_json"]) or {}
-        except Exception:
-            base = {}
-    base["link"] = link
-    # Merge with existing gallery if present, dedupe by URL
-    existing_gallery = base.get("gallery")
-    if not isinstance(existing_gallery, list):
-        existing_gallery = []
-
-    existing_urls: set[str] = set()
-    for item in existing_gallery:
-        if isinstance(item, dict):
-            url = (item.get("url") or "").strip()
-            if url:
-                existing_urls.add(url)
-
+    repo = get_repo_subject(conn, repo_id)
+    if not repo:
+        # Create minimal repo subject if missing (shouldn't happen normally)
+        repo = RepoSubject(id=repo_id, name=repo_id.split("/")[-1])
+    
+    repo.link = link
+    
+    # Merge with existing gallery, dedupe by URL
+    existing_urls: set[str] = {img.url for img in repo.gallery}
+    
     num_added = 0
     for item in gallery:
-        url = (item.get("url") or "").strip()
+        url = item.get("url", "").strip()
         if not url or url in existing_urls:
             continue
-        existing_gallery.append(item)
+        gallery_img = GalleryImage(**item)
+        repo.gallery.append(gallery_img)
         existing_urls.add(url)
         num_added += 1
-
-    base["gallery"] = existing_gallery
-    upsert_subject(conn, "repo", repo_id, json.dumps(base))
-
-    set_work_status(conn, "enhance_repo_media", "repo", repo_id, "succeeded", json.dumps({"link": link, "gallery_count": len(base.get("gallery", [])), "added": num_added}))
+    
+    upsert_repo_subject(conn, repo_id, repo)
+    
+    output = EnhanceRepoMediaOutput(link=link, gallery_count=len(repo.gallery), added=num_added)
+    set_work_status(conn, "enhance_repo_media", "repo", repo_id, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] enhance_repo_media done repo={repo_id} link={bool(link)} gallery={len(gallery)}")
 
@@ -694,18 +706,17 @@ def generate_repo_blurb(repo_id: str) -> None:
         desc = ""
 
     # Merge into repo subject
-    row = get_subject(conn, "repo", repo_id)
-    base = {}
-    if row and row["data_json"]:
-        try:
-            base = json.loads(row["data_json"]) or {}
-        except Exception:
-            base = {}
+    repo = get_repo_subject(conn, repo_id)
+    if not repo:
+        # Create minimal repo subject if missing
+        repo = RepoSubject(id=repo_id, name=repo_id.split("/")[-1])
+    
     if desc:
-        base["generated_description"] = desc
-        upsert_subject(conn, "repo", repo_id, json.dumps(base))
-
-    set_work_status(conn, "generate_repo_blurb", "repo", repo_id, "succeeded", json.dumps({"generated": bool(desc)}))
+        repo.generated_description = desc
+        upsert_repo_subject(conn, repo_id, repo)
+    
+    output = GenerateRepoBlurbOutput(description_len=len(desc))
+    set_work_status(conn, "generate_repo_blurb", "repo", repo_id, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] generate_repo_blurb done repo={repo_id} has_desc={bool(desc)}")
 
@@ -724,8 +735,8 @@ def extract_repo_emphasis(repo_id: str) -> None:
     set_work_status(conn, "extract_repo_emphasis", "repo", repo_id, "running")
 
     # Load repo subject
-    row = get_subject(conn, "repo", repo_id)
-    if not row or not row["data_json"]:
+    repo = get_repo_subject(conn, repo_id)
+    if not repo:
         set_work_status(
             conn,
             "extract_repo_emphasis",
@@ -738,23 +749,8 @@ def extract_repo_emphasis(repo_id: str) -> None:
         print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=no_subject")
         return
 
-    try:
-        base = json.loads(row["data_json"]) or {}
-    except Exception:
-        set_work_status(
-            conn,
-            "extract_repo_emphasis",
-            "repo",
-            repo_id,
-            "failed",
-            json.dumps({"reason": "invalid_subject_json"}),
-        )
-        conn.commit()
-        print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=invalid_subject_json")
-        return
-
-    desc = base.get("generated_description")
-    if not isinstance(desc, str) or not desc.strip():
+    desc = repo.generated_description
+    if not desc or not desc.strip():
         set_work_status(
             conn,
             "extract_repo_emphasis",
@@ -801,16 +797,11 @@ def extract_repo_emphasis(repo_id: str) -> None:
         return
 
     # Persist emphasis and mark success
-    base["emphasis"] = emphasis_list
-    upsert_subject(conn, "repo", repo_id, json.dumps(base))
-    set_work_status(
-        conn,
-        "extract_repo_emphasis",
-        "repo",
-        repo_id,
-        "succeeded",
-        json.dumps({"extracted": True, "count": len(emphasis_list)}),
-    )
+    repo.emphasis = emphasis_list
+    upsert_repo_subject(conn, repo_id, repo)
+    
+    output = ExtractRepoEmphasisOutput(emphasis=emphasis_list, count=len(emphasis_list))
+    set_work_status(conn, "extract_repo_emphasis", "repo", repo_id, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] extract_repo_emphasis done repo={repo_id} count={len(emphasis_list)}")
 
@@ -829,8 +820,8 @@ def extract_repo_keywords(repo_id: str) -> None:
     set_work_status(conn, "extract_repo_keywords", "repo", repo_id, "running")
 
     # Load repo subject
-    row = get_subject(conn, "repo", repo_id)
-    if not row or not row["data_json"]:
+    repo = get_repo_subject(conn, repo_id)
+    if not repo:
         set_work_status(
             conn,
             "extract_repo_keywords",
@@ -843,23 +834,8 @@ def extract_repo_keywords(repo_id: str) -> None:
         print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason=no_subject")
         return
 
-    try:
-        base = json.loads(row["data_json"]) or {}
-    except Exception:
-        set_work_status(
-            conn,
-            "extract_repo_keywords",
-            "repo",
-            repo_id,
-            "failed",
-            json.dumps({"reason": "invalid_subject_json"}),
-        )
-        conn.commit()
-        print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason=invalid_subject_json")
-        return
-
-    desc = base.get("generated_description")
-    if not isinstance(desc, str) or not desc.strip():
+    desc = repo.generated_description
+    if not desc or not desc.strip():
         set_work_status(
             conn,
             "extract_repo_keywords",
@@ -915,16 +891,11 @@ def extract_repo_keywords(repo_id: str) -> None:
         return
 
     # Persist keywords and mark success
-    base["keywords"] = keywords_list
-    upsert_subject(conn, "repo", repo_id, json.dumps(base))
-    set_work_status(
-        conn,
-        "extract_repo_keywords",
-        "repo",
-        repo_id,
-        "succeeded",
-        json.dumps({"extracted": True, "count": len(keywords_list)}),
-    )
+    repo.keywords = keywords_list
+    upsert_repo_subject(conn, repo_id, repo)
+    
+    output = ExtractRepoKeywordsOutput(keywords=keywords_list, count=len(keywords_list))
+    set_work_status(conn, "extract_repo_keywords", "repo", repo_id, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] extract_repo_keywords done repo={repo_id} count={len(keywords_list)}")
 
@@ -941,15 +912,11 @@ def extract_repo_kind(repo_id: str) -> None:
     set_work_status(conn, "extract_repo_kind", "repo", repo_id, "running")
 
     # Load repo subject (best-effort, minimal)
-    row = get_subject(conn, "repo", repo_id)
-    base = {}
-    if row and row.get("data_json"):
-        try:
-            base = json.loads(row["data_json"]) or {}
-        except Exception:
-            base = {}
-
-    desc = base.get("generated_description") or ""
+    repo = get_repo_subject(conn, repo_id)
+    if not repo:
+        repo = RepoSubject(id=repo_id, name=repo_id.split("/")[-1])
+    
+    desc = repo.generated_description or ""
 
     prompt = (
         "in one single and simple 1-4 words phrase/noun phrase, can you say what this is (eg. new aggregator, functional programming language, data workflow orchestration)? use simple and understandable terms Just the answer please\n\n"
@@ -964,15 +931,10 @@ def extract_repo_kind(repo_id: str) -> None:
     phrase = (text or "").strip()
 
     # Persist and mark success (even if empty; minimal enforcement requested)
-    base["kind"] = phrase
-    upsert_subject(conn, "repo", repo_id, json.dumps(base))
-    set_work_status(
-        conn,
-        "extract_repo_kind",
-        "repo",
-        repo_id,
-        "succeeded",
-        json.dumps({"kind": phrase}),
-    )
+    repo.kind = phrase
+    upsert_repo_subject(conn, repo_id, repo)
+    
+    output = ExtractRepoKindOutput(kind=phrase)
+    set_work_status(conn, "extract_repo_kind", "repo", repo_id, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] extract_repo_kind done repo={repo_id} kind_len={len(phrase)}")

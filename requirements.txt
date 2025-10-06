@@ -9,3 +9,4 @@ tiktoken
 typing-extensions
 gunicorn
 psycopg[binary]
+pydantic>=2.0

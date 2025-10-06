@@ -17,8 +17,13 @@ from db import (
     delete_user_repo_subjects,
     upsert_subject,
     upsert_user_repo_link,
+    get_user_subject,
+    get_repo_subject,
+    upsert_user_subject,
+    upsert_repo_subject,
 )
 from defs import all_assets, asset_meta, defs as dag_defs
+from models import UserSubject, RepoSubject, GalleryImage
 
 
 app = Flask(__name__)
@@ -214,12 +219,27 @@ def data(username: str):
     conn = get_conn()
     u = get_subject(conn, "user", username)
     repos = get_user_repos(conn, username)
-    return jsonify(
-        {
-            "user": json.loads(u["data_json"]) if u and u["data_json"] else None,
-            "repos": [json.loads(r["data_json"]) for r in repos if r["data_json"]],
-        }
-    )
+    
+    # Validate and serialize user
+    user_data = None
+    if u and u["data_json"]:
+        try:
+            user_model = UserSubject.model_validate_json(u["data_json"])
+            user_data = user_model.model_dump()
+        except Exception:
+            user_data = None
+    
+    # Validate and serialize repos
+    repos_data = []
+    for r in repos:
+        if r["data_json"]:
+            try:
+                repo_model = RepoSubject.model_validate_json(r["data_json"])
+                repos_data.append(repo_model.model_dump())
+            except Exception:
+                continue
+    
+    return jsonify({"user": user_data, "repos": repos_data})
 
 
 @app.get("/users/<username>/progress")
@@ -265,20 +285,16 @@ def for_you(viewer_username: str):
 
     user_to_highlight_names: dict[str, list[str]] = {}
     for row in user_rows:
-        try:
-            data = json.loads(row["data_json"]) if row.get("data_json") else None
-        except Exception:
-            data = None
-        if not isinstance(data, dict):
+        if not row.get("data_json"):
             continue
-        hl = data.get("highlighted_repos")
-        if isinstance(hl, list) and any(isinstance(n, str) and n.strip() for n in hl):
-            username = str(row.get("subject_id") or "").strip()
-            if not username:
-                continue
-            names = [str(n).strip() for n in hl if isinstance(n, str) and str(n).strip()]
-            if names:
-                user_to_highlight_names[username] = names
+        try:
+            user = UserSubject.model_validate_json(row["data_json"])
+            if user.highlighted_repos:
+                username = str(row.get("subject_id") or "").strip()
+                if username:
+                    user_to_highlight_names[username] = user.highlighted_repos
+        except Exception:
+            continue
 
     # Build feed
     feed: list[tuple[float, dict]] = []  # (subjects.updated_at, repo_json_with_username)
@@ -293,17 +309,14 @@ def for_you(viewer_username: str):
             if not data_json:
                 continue
             try:
-                obj = json.loads(data_json)
+                repo = RepoSubject.model_validate_json(data_json)
+                # Stash parsed object alongside the row for selection
+                name_to_candidates.setdefault(repo.name, []).append({
+                    "obj": repo.model_dump(),
+                    "row": r,
+                })
             except Exception:
                 continue
-            repo_name = obj.get("name")
-            if not isinstance(repo_name, str) or not repo_name:
-                continue
-            # Stash parsed object alongside the row for selection
-            name_to_candidates.setdefault(repo_name, []).append({
-                "obj": obj,
-                "row": r,
-            })
 
         for repo_name in names:
             candidates = name_to_candidates.get(repo_name)
@@ -420,43 +433,37 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
     conn = get_conn()
 
     # Load existing repo subject (or initialize)
-    row = get_subject(conn, "repo", repo_id)
-    base = {}
-    if row and row.get("data_json"):
-        try:
-            import json as _json
-            base = _json.loads(row["data_json"]) or {}
-        except Exception:
-            base = {}
-
-    gallery = base.get("gallery")
-    if not isinstance(gallery, list):
-        gallery = []
+    repo = get_repo_subject(conn, repo_id)
+    if not repo:
+        repo = RepoSubject(id=repo_id, name=repo)
 
     # Build existing keys set for dedupe
     existing_keys = set()
-    if dedupe_key is not False:
-        for it in gallery:
-            if isinstance(it, dict) and dedupe_key in it and isinstance(it.get(dedupe_key), str):
-                existing_keys.add(it.get(dedupe_key).strip())
+    if dedupe_key is not False and dedupe_key in ["url", "original_url"]:
+        for img in repo.gallery:
+            val = getattr(img, dedupe_key, None)
+            if val:
+                existing_keys.add(val.strip())
 
     added = 0
     skipped = 0
     for item in to_add:
-        key_val = item.get(dedupe_key).strip() if isinstance(dedupe_key, str) else None
+        key_val = item.get(dedupe_key, "").strip() if isinstance(dedupe_key, str) else None
         if dedupe_key is not False and key_val in existing_keys:
             skipped += 1
             continue
-        gallery.append(item)
-        if dedupe_key is not False and isinstance(key_val, str):
-            existing_keys.add(key_val)
-        added += 1
-
-    base["gallery"] = gallery
+        try:
+            gallery_img = GalleryImage(**item)
+            repo.gallery.append(gallery_img)
+            if dedupe_key is not False and isinstance(key_val, str):
+                existing_keys.add(key_val)
+            added += 1
+        except Exception:
+            skipped += 1
+            continue
 
     # Persist subject
-    import json as _json
-    upsert_subject(conn, "repo", repo_id, _json.dumps(base))
+    upsert_repo_subject(conn, repo_id, repo)
 
     # Optionally ensure link for user->repo
     if link_flag:
@@ -472,7 +479,7 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
         "repo_id": repo_id,
         "added": added,
         "skipped": skipped,
-        "gallery_count": len(gallery),
+        "gallery_count": len(repo.gallery),
     })
 
 
@@ -496,39 +503,26 @@ def delete_repo_gallery_images(username: str, owner: str, repo: str):
         return jsonify({"ok": False, "error": "no_urls"}), 400
 
     conn = get_conn()
-    row = get_subject(conn, "repo", repo_id)
-
-    import json as _json
-    base = {}
-    if row and row.get("data_json"):
-        try:
-            base = _json.loads(row["data_json"]) or {}
-        except Exception:
-            base = {}
-
-    gallery = base.get("gallery")
-    if not isinstance(gallery, list) or not gallery:
+    repo = get_repo_subject(conn, repo_id)
+    
+    if not repo or not repo.gallery:
         # Nothing to remove
         return jsonify({"ok": True, "removed": 0, "gallery_count": 0})
 
     new_gallery = []
     removed = 0
-    for it in gallery:
-        try:
-            u = (it.get("url") or "").strip() if isinstance(it, dict) else ""
-        except Exception:
-            u = ""
-        if u and u in urls:
+    for img in repo.gallery:
+        if img.url in urls:
             removed += 1
             continue
-        new_gallery.append(it)
+        new_gallery.append(img)
 
     if removed > 0:
-        base["gallery"] = new_gallery
-        upsert_subject(conn, "repo", repo_id, _json.dumps(base))
+        repo.gallery = new_gallery
+        upsert_repo_subject(conn, repo_id, repo)
         conn.commit()
 
-    return jsonify({"ok": True, "removed": removed, "gallery_count": len(base.get("gallery", []))})
+    return jsonify({"ok": True, "removed": removed, "gallery_count": len(repo.gallery)})
 
 @app.get("/users/<username>/repos/<owner>/<repo>/gallery")
 def get_repo_gallery(username: str, owner: str, repo: str):
@@ -538,17 +532,13 @@ def get_repo_gallery(username: str, owner: str, repo: str):
     """
     repo_id = f"{owner}/{repo}"
     conn = get_conn()
-    row = get_subject(conn, "repo", repo_id)
+    repo_obj = get_repo_subject(conn, repo_id)
     
-    if not row or not row.get("data_json"):
+    if not repo_obj:
         return jsonify({"gallery": []})
     
-    try:
-        data = json.loads(row["data_json"])
-        gallery = data.get("gallery", [])
-        return jsonify({"gallery": gallery})
-    except Exception:
-        return jsonify({"gallery": []})
+    gallery = [img.model_dump() for img in repo_obj.gallery]
+    return jsonify({"gallery": gallery})
 
 @app.patch("/users/<username>/repos/<owner>/<repo>/gallery")
 def update_repo_gallery_image(username: str, owner: str, repo: str):
@@ -602,36 +592,23 @@ def update_repo_gallery_image(username: str, owner: str, repo: str):
         return jsonify({"ok": False, "error": "no_fields"}), 400
 
     conn = get_conn()
-    row = get_subject(conn, "repo", repo_id)
-    base = {}
-    if row and row.get("data_json"):
-        try:
-            base = json.loads(row["data_json"]) or {}
-        except Exception:
-            base = {}
-
-    gallery = base.get("gallery")
-    if not isinstance(gallery, list) or not gallery:
+    repo_obj = get_repo_subject(conn, repo_id)
+    
+    if not repo_obj or not repo_obj.gallery:
         return jsonify({"ok": True, "updated": 0})
 
     updated = 0
-    for it in gallery:
-        try:
-            u = (it.get("url") or "").strip() if isinstance(it, dict) else ""
-        except Exception:
-            u = ""
-        if u == url:
+    for img in repo_obj.gallery:
+        if img.url == url:
             # Update whitelisted fields only
             for k, v in updatable.items():
-                it[k] = v
+                setattr(img, k, v)
             updated += 1
             break
 
     if updated:
         try:
-            import json as _json
-            base["gallery"] = gallery
-            upsert_subject(conn, "repo", repo_id, _json.dumps(base))
+            upsert_repo_subject(conn, repo_id, repo_obj)
             conn.commit()
         except Exception:
             pass
