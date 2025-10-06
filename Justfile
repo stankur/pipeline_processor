@@ -53,8 +53,6 @@ check:
     python --version
     @echo "Checking if .env exists..."
     @test -f .env && echo ".env file exists" || echo "WARNING: .env file missing - copy from .env.example"
-    @echo "Checking if database exists..."
-    @test -f app.db && echo "Database exists" || echo "WARNING: Run 'just init-db' to create database"
     @echo "Checking if git is available..."
     git --version
     @echo "Checking virtual environment..."

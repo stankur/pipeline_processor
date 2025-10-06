@@ -6,7 +6,6 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
-  NET_DB_PATH = "/data/app.db"
 
 # Single process: Flask API; worker runs via API-triggered threads
 [processes]
@@ -26,10 +25,6 @@ primary_region = "iad"
     type = "requests"
     hard_limit = 50
     soft_limit = 40
-
-[[mounts]]
-  source = "data"
-  destination = "/data"
 
 [vm]
   memory = 512

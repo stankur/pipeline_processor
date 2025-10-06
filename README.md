@@ -162,11 +162,14 @@ just run-selection stankur "fetch_repos_asset,select_highlighted_repos_asset"
 ### Database
 
 ```bash
-# Check if database exists
-ls -la app.db
+# Start local Supabase (Postgres) for development
+just supa-start
 
 # Reset database (delete all data)
 just reset-db
+
+# Stop local Supabase
+just supa-stop
 ```
 
 ### Database UI (pgweb)
@@ -199,9 +202,22 @@ just check
 
 ### Environment Variables (.env)
 
--   `NET_DB_PATH` - Path to SQLite database (default: `./app.db`)
+-   `DATABASE_URL` - Postgres connection string (defaults to local Supabase at `postgresql://postgres:postgres@localhost:54322/postgres`)
 -   `OPENROUTER_API_KEY` - For LLM calls (required for repo selection and blurb generation)
 -   `GITHUB_TOKEN` - For GitHub API (optional but recommended for rate limits)
+-   `API_KEY` - Optional API key for securing endpoints (include as `Authorization: Bearer <API_KEY>`)
+-   `ALLOWED_ORIGINS` - Comma-separated CORS origins (e.g., `http://localhost:3000`)
+
+### Supabase Connection (Production)
+
+For cloud Supabase, set `DATABASE_URL` in your environment:
+
+1. Go to your Supabase project → **Settings** → **Database**
+2. Copy **Connection String** → **URI** (Transaction mode)
+3. Set as environment variable:
+    ```bash
+    export DATABASE_URL="postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres"
+    ```
 
 ### Users
 
@@ -211,7 +227,7 @@ The pipeline works with **any GitHub username** dynamically. No configuration ne
 
 ### Common Issues
 
--   **"Database not found"**: Run `just init-db`
+-   **"Database connection failed"**: Start local Supabase with `just supa-start` or set `DATABASE_URL` for cloud instance
 -   **"Permission denied"**: Check virtual environment with `just check`
 -   **"API key missing"**: Configure `.env` file
 -   **"Git not found"**: Install git (required for repo analysis)
@@ -220,6 +236,6 @@ The pipeline works with **any GitHub username** dynamically. No configuration ne
 
 ```bash
 just clean      # Remove Dagster logs/cache
-just reset-db   # Delete database
-just init-db    # Recreate database
+just reset-db   # Reset database (Supabase)
+just init-db    # Recreate tables
 ```
