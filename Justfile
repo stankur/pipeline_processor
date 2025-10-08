@@ -74,6 +74,15 @@ start user="stankur":
 restart user="stankur":
     curl -X POST http://localhost:8080/users/{{user}}/restart
 
+delete user="stankur":
+    curl -X DELETE http://localhost:8080/users/{{user}}
+
+ghost user="stankur":
+    curl -X POST http://localhost:8080/ghost-users/{{user}}
+
+login user="stankur":
+    curl -X POST http://localhost:8080/users/{{user}}/login
+
 progress user="stankur":
     curl http://localhost:8080/users/{{user}}/progress
 

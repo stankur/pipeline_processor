@@ -15,6 +15,7 @@ from db import (
     reset_user_work_items_to_pending,
     reset_user_repo_work_items_to_pending,
     delete_user_repo_subjects,
+    delete_user_completely,
     upsert_subject,
     upsert_user_repo_link,
     get_user_subject,
@@ -100,6 +101,90 @@ def _require_api_key():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
 
+@app.post("/users/<username>/login")
+def login(username: str):
+    """Handle user login and determine if pipeline needs to run.
+    
+    Returns status: "new" | "activated" | "existing"
+    """
+    print(f"[api] login called username={username}")
+    conn = get_conn()
+    
+    user = get_user_subject(conn, username)
+    
+    if not user:
+        print(f"[api] login: new user username={username}")
+        _run_worker_async(username)
+        return jsonify({
+            "ok": True,
+            "status": "new",
+            "processing": True,
+            "data_ready": False,
+        })
+    
+    if user.is_ghost:
+        print(f"[api] login: activating ghost username={username}")
+        user.is_ghost = False
+        upsert_user_subject(conn, username, user)
+        conn.commit()
+        return jsonify({
+            "ok": True,
+            "status": "activated",
+            "processing": False,
+            "data_ready": True,
+        })
+    
+    print(f"[api] login: existing user username={username}")
+    return jsonify({
+        "ok": True,
+        "status": "existing",
+        "processing": False,
+        "data_ready": True,
+    })
+
+
+@app.post("/ghost-users/<username>")
+def create_ghost_user(username: str):
+    """Create an inactive user account with their data pre-fetched.
+    
+    Query params:
+      - force: If true, recreate even if user exists
+    """
+    print(f"[api] create_ghost_user called username={username}")
+    force = request.args.get("force", "").lower() in ("true", "1", "yes")
+    
+    conn = get_conn()
+    existing = get_user_subject(conn, username)
+    
+    if existing and not force:
+        return jsonify({
+            "ok": False,
+            "error": "user_exists",
+            "message": "User already exists. Use ?force=true to recreate.",
+            "is_ghost": existing.is_ghost,
+        }), 400
+    
+    if existing and force:
+        print(f"[api] create_ghost_user: forcing recreation username={username}")
+        existing.is_ghost = True
+        upsert_user_subject(conn, username, existing)
+        conn.commit()
+    else:
+        print(f"[api] create_ghost_user: creating new ghost username={username}")
+        ghost = UserSubject(login=username, is_ghost=True)
+        upsert_user_subject(conn, username, ghost)
+        conn.commit()
+    
+    _run_worker_async(username)
+    
+    return jsonify({
+        "ok": True,
+        "created": True,
+        "is_ghost": True,
+        "processing": True,
+    })
+
+
 @app.post("/users/<username>/start")
 def start(username: str):
     """Start the full pipeline for a user."""
@@ -152,6 +237,27 @@ def restart(username: str):
     _run_worker_async(username)
     print(f"[api] restart queued username={username}")
     return jsonify({"ok": True, "queued": True, "forced": True})
+
+
+@app.delete("/users/<username>")
+def delete_user(username: str):
+    """Delete a user and all their associated resources.
+    
+    Removes user subject, work items, repo links, and owned repos.
+    """
+    print(f"[api] delete_user called username={username}")
+    conn = get_conn()
+    
+    # Check if user exists
+    user = get_user_subject(conn, username)
+    if not user:
+        return jsonify({"ok": False, "error": "user_not_found"}), 404
+    
+    delete_user_completely(conn, username)
+    conn.commit()
+    
+    print(f"[api] delete_user completed username={username}")
+    return jsonify({"ok": True, "deleted": True})
 
 
 @app.post("/users/<username>/restart-from")
@@ -220,7 +326,6 @@ def data(username: str):
     u = get_subject(conn, "user", username)
     repos = get_user_repos(conn, username)
     
-    # Validate and serialize user
     user_data = None
     if u and u["data_json"]:
         try:
@@ -229,7 +334,6 @@ def data(username: str):
         except Exception:
             user_data = None
     
-    # Validate and serialize repos
     repos_data = []
     for r in repos:
         if r["data_json"]:
@@ -284,6 +388,7 @@ def for_you(viewer_username: str):
     ).fetchall()
 
     user_to_highlight_names: dict[str, list[str]] = {}
+    user_to_is_ghost: dict[str, bool] = {}
     for row in user_rows:
         if not row.get("data_json"):
             continue
@@ -293,6 +398,7 @@ def for_you(viewer_username: str):
                 username = str(row.get("subject_id") or "").strip()
                 if username:
                     user_to_highlight_names[username] = user.highlighted_repos
+                    user_to_is_ghost[username] = user.is_ghost
         except Exception:
             continue
 
@@ -340,6 +446,7 @@ def for_you(viewer_username: str):
             best = max(candidates, key=_selection_key)
             obj = dict(best["obj"])  # copy to avoid mutating cached
             obj["username"] = username
+            obj["is_ghost"] = user_to_is_ghost.get(username, False)
             upd = best["row"].get("updated_at") or 0
             feed.append((upd, obj))
 

@@ -35,9 +35,9 @@ class UserSubject(BaseModel):
     bio: Optional[str] = None
     location: Optional[str] = None
     blog: Optional[str] = None
-    # Added by infer_user_theme task
     theme: Optional[str] = None
     highlighted_repos: list[str] = Field(default_factory=list)
+    is_ghost: bool = False
 
 
 class RepoSubject(BaseModel):

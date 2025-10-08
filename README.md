@@ -58,6 +58,15 @@ just dev
 
 ## API Usage
 
+### User login (handles new/ghost/existing users)
+
+```bash
+# Unified login endpoint
+curl -X POST http://localhost:8080/users/stankur/login
+
+# Returns status: "new" (processing), "activated" (ghost user), or "existing" (ready)
+```
+
 ### Start pipeline for any user
 
 ```bash
@@ -67,10 +76,26 @@ curl -X POST http://localhost:8080/users/octocat/start
 curl -X POST http://localhost:8080/users/torvalds/start
 ```
 
+### Ghost users (pre-populate inactive accounts)
+
+```bash
+# Create ghost user and fetch their data once
+curl -X POST http://localhost:8080/ghost-users/torvalds
+
+# Ghost users appear in feed with is_ghost=true until they login
+# When they login via /login, they're instantly activated (data already ready)
+```
+
 ### Force restart (clears data and reruns)
 
 ```bash
 curl -X POST http://localhost:8080/users/stankur/restart
+```
+
+### Delete user and all resources
+
+```bash
+curl -X DELETE http://localhost:8080/users/stankur
 ```
 
 ### Check progress
@@ -85,14 +110,14 @@ curl http://localhost:8080/users/stankur/progress
 curl http://localhost:8080/users/stankur/data
 ```
 
-### For You feed (mock, non-personalized)
+### For You feed
 
 ```bash
 curl http://localhost:8080/for-you/<viewer_username>
 ```
 
 -   Returns a feed built from all users' `highlighted_repos`.
--   Each item is the exact repo JSON stored in subjects (same as `/users/<username>/data`), plus a `username` field indicating whose highlight list it came from.
+-   Each repo includes `username` (owner) and `is_ghost` (whether user is inactive).
 -   Sorted by repo subject `updated_at` descending. No pagination/limits (for now).
 
 ### Repo gallery management
@@ -145,16 +170,26 @@ curl -X PATCH http://localhost:8080/users/alice/repos/octocat/hello-world/galler
       }'
 ```
 
-## Direct Pipeline Commands
+## Quick Commands
 
 ```bash
-# Run full pipeline for any user
-just run stankur
-just run octocat
-just run torvalds
+# User management
+just login alice           # Login endpoint (handles new/ghost/existing)
+just ghost alice           # Create ghost user (pre-populate)
+just delete alice          # Delete user and all resources
 
-# Run specific assets for any user
-just run-selection stankur "fetch_repos_asset,select_highlighted_repos_asset"
+# Pipeline
+just start alice           # Start pipeline
+just restart alice         # Force restart
+just progress alice        # Check progress
+just data alice            # Get final data
+
+# Feed
+just for-you alice         # Get personalized feed
+
+# Direct pipeline (Dagster)
+just run alice             # Run full pipeline directly
+just run-selection alice "fetch_repos_asset"  # Run specific assets
 ```
 
 ## Inspection

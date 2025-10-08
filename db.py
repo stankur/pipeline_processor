@@ -280,6 +280,55 @@ def delete_user_repo_links(conn: Connection, username: str) -> None:
     print(f"[db] delete_user_repo_links ok user={username}")
 
 
+def delete_user_completely(conn: Connection, username: str) -> None:
+    """Delete a user and all their associated resources.
+    
+    Removes:
+    - User subject
+    - All work items (user-scoped and repo-scoped)
+    - User-repo links
+    - Owned repo subjects (username/*)
+    """
+    print(f"[db] delete_user_completely user={username}")
+    
+    # Delete work items for user-scoped tasks
+    conn.execute(
+        "DELETE FROM work_items WHERE subject_type='user' AND subject_id=%s",
+        (username,),
+    )
+    
+    # Delete work items for repos owned by this user
+    conn.execute(
+        """
+        DELETE FROM work_items 
+        WHERE subject_type='repo' AND subject_id IN (
+            SELECT repo_id FROM user_repo_links WHERE username=%s
+        )
+        """,
+        (username,),
+    )
+    
+    # Delete user-repo links
+    conn.execute(
+        "DELETE FROM user_repo_links WHERE username=%s",
+        (username,),
+    )
+    
+    # Delete owned repo subjects
+    conn.execute(
+        "DELETE FROM subjects WHERE subject_type='repo' AND subject_id LIKE %s",
+        (f"{username}/%",),
+    )
+    
+    # Delete user subject
+    conn.execute(
+        "DELETE FROM subjects WHERE subject_type='user' AND subject_id=%s",
+        (username,),
+    )
+    
+    print(f"[db] delete_user_completely ok user={username}")
+
+
 # -------------------- Pydantic-based helpers --------------------
 
 

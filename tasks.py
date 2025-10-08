@@ -115,13 +115,17 @@ def fetch_profile(username: str) -> None:
     profile = client.get_user(username)
     print(f"[task] fetch_profile got profile login={profile.get('login')}")
     
-    # Create validated user subject
+    # Read existing user to preserve is_ghost flag
+    existing = get_user_subject(conn, username)
+    is_ghost = existing.is_ghost if existing else False
+    
     user = UserSubject(
         login=profile.get("login") or username,
         avatar_url=profile.get("avatar_url"),
         bio=profile.get("bio"),
         location=profile.get("location"),
         blog=profile.get("blog"),
+        is_ghost=is_ghost,
     )
     upsert_user_subject(conn, username, user)
     print(f"[task] fetch_profile upserted username={username}")
@@ -547,7 +551,6 @@ def infer_user_theme(username: str) -> None:
     # Persist into user subject
     user = get_user_subject(conn, username)
     if not user:
-        # Shouldn't happen since fetch_profile runs first, but handle gracefully
         user = UserSubject(login=username)
     
     user.theme = theme
