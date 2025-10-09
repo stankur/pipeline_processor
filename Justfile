@@ -69,33 +69,33 @@ clean:
 
 # API wrapper commands
 start user="stankur":
-    curl -X POST http://localhost:8080/users/{{user}}/start
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/start || curl -X POST http://localhost:8080/users/{{user}}/start
 
 restart user="stankur":
-    curl -X POST http://localhost:8080/users/{{user}}/restart
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/restart || curl -X POST http://localhost:8080/users/{{user}}/restart
 
 delete user="stankur":
-    curl -X DELETE http://localhost:8080/users/{{user}}
+    @[ -n "$API_KEY" ] && curl -X DELETE -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}} || curl -X DELETE http://localhost:8080/users/{{user}}
 
 ghost user="stankur":
-    curl -X POST http://localhost:8080/ghost-users/{{user}}
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/ghost-users/{{user}} || curl -X POST http://localhost:8080/ghost-users/{{user}}
 
 login user="stankur":
-    curl -X POST http://localhost:8080/users/{{user}}/login
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/login || curl -X POST http://localhost:8080/users/{{user}}/login
 
 progress user="stankur":
-    curl http://localhost:8080/users/{{user}}/progress
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/progress || curl http://localhost:8080/users/{{user}}/progress
 
 data user="stankur":
-    curl http://localhost:8080/users/{{user}}/data
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/data || curl http://localhost:8080/users/{{user}}/data
 
 # For You feed (mock, non-personalized)
 for-you user="stankur":
-    curl http://localhost:8080/for-you/{{user}}
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/for-you/{{user}} || curl http://localhost:8080/for-you/{{user}}
 
 # Restart from a specific asset key (and downstream)
 restart-from user="stankur" start="generate_repo_blurb_asset":
-    curl -X POST "http://localhost:8080/users/{{user}}/restart-from?start={{start}}"
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/users/{{user}}/restart-from?start={{start}}" || curl -X POST "http://localhost:8080/users/{{user}}/restart-from?start={{start}}"
 
 # Show available commands
 help:
