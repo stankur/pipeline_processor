@@ -91,22 +91,13 @@ def _require_api_key():
     Expect header: Authorization: Bearer <API_KEY>
     """
     api_key = (os.environ.get("API_KEY") or "").strip()
-    print(f"[DEBUG] API_KEY present: {bool(api_key)}, len={len(api_key) if api_key else 0}")
     if not api_key:
         return None  # no auth enforced
     # Allow unauthenticated health endpoint
     if request.path in ("/healthz", "/_healthz"):
         return None
     auth = request.headers.get("Authorization", "")
-    print(f"[DEBUG] Auth header present: {bool(auth)}, starts_with_Bearer: {auth.startswith('Bearer ')}")
-    if auth.startswith("Bearer "):
-        provided_key = auth.split(" ", 1)[1].strip()
-        print(f"[DEBUG] Provided key len={len(provided_key)}, expected len={len(api_key)}, match={provided_key == api_key}")
-        print(f"[DEBUG] Expected key: {api_key}")
-        print(f"[DEBUG] Provided key: {provided_key}")
-        if provided_key != api_key:
-            return jsonify({"ok": False, "error": "unauthorized"}), 401
-    else:
+    if not auth.startswith("Bearer ") or auth.split(" ", 1)[1].strip() != api_key:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
 
