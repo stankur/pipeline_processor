@@ -102,6 +102,8 @@ def _require_api_key():
     if auth.startswith("Bearer "):
         provided_key = auth.split(" ", 1)[1].strip()
         print(f"[DEBUG] Provided key len={len(provided_key)}, expected len={len(api_key)}, match={provided_key == api_key}")
+        print(f"[DEBUG] Expected key: {api_key}")
+        print(f"[DEBUG] Provided key: {provided_key}")
         if provided_key != api_key:
             return jsonify({"ok": False, "error": "unauthorized"}), 401
     else:
