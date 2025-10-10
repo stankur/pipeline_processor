@@ -48,37 +48,18 @@ def infer_user_theme_asset(config: UserConfig) -> None:
     infer_user_theme(config.username)
 
 
-@asset(deps=[select_highlighted_repos_asset], metadata={"work_item_kinds": ["enhance_repo_media"], "scope": "repo"})
+@asset(deps=[fetch_repos_asset], metadata={"work_item_kinds": ["enhance_repo_media"], "scope": "repo"})
 def enhance_repo_media_asset(config: UserConfig) -> None:
-    """Enhance media for each highlighted repo - reads highlighted repos from DB."""
+    """Enhance media for all user repos - extracts links and images from README."""
     username = config.username
-    
-    # Read highlighted repos from DB
     conn = get_conn()
-    work_item = get_work_item(conn, "select_highlighted_repos", "user", username)
-    highlighted_repo_names = []
-    if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
-        try:
-            data = json.loads(work_item["output_json"])
-            highlighted_repo_names = data.get("repos", [])
-        except Exception:
-            pass
     
-    # Get repo IDs from highlighted repos (need to convert names to full IDs)
+    # Get all user repos
     user_repos = get_user_repos(conn, username)
-    repo_by_name = {}
-    for repo_row in user_repos:
-        try:
-            repo_data = json.loads(repo_row["data_json"]) if repo_row["data_json"] else {}
-            name = repo_data.get("name")
-            if name:
-                repo_by_name[name] = repo_row["subject_id"]
-        except Exception:
-            continue
     
-    # Enhance each highlighted repo
-    for repo_name in highlighted_repo_names:
-        repo_id = repo_by_name.get(repo_name)
+    # Enhance each repo
+    for repo_row in user_repos:
+        repo_id = repo_row.get("subject_id")
         if repo_id:
             enhance_repo_media(repo_id)
 

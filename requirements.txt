@@ -10,3 +10,6 @@ typing-extensions
 gunicorn
 psycopg[binary]
 pydantic>=2.0
+mistune
+beautifulsoup4
+Pillow

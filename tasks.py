@@ -564,6 +564,183 @@ def infer_user_theme(username: str) -> None:
     print(f"[task] infer_user_theme done username={username} theme_len={len(theme)} highlights={len(highlights)}")
 
 
+def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    """Extract demo images from repo README by checking actual dimensions.
+    
+    Args:
+        owner: Repository owner
+        name: Repository name
+    
+    Returns:
+        (link, gallery_list) where:
+        - link: Optional homepage URL from repo metadata
+        - gallery_list: List of dicts with keys: url, alt, width, height, original_url, taken_at, is_highlight
+    """
+    import mistune
+    from bs4 import BeautifulSoup
+    from PIL import Image
+    import requests
+    from io import BytesIO
+    
+    client = GitHubClient()
+
+    # Fetch README content and repo metadata
+    readme_content, _ = client.get_repo_readme(owner, name)
+    repo_meta = None
+    try:
+        repo_meta = client.get_repo(owner, name)
+    except Exception:
+        repo_meta = None
+
+    # Extract homepage link
+    link = None
+    if repo_meta:
+        homepage = repo_meta.get("homepage")
+        if isinstance(homepage, str) and homepage.strip():
+            h = homepage.strip()
+            if h.startswith("//"):
+                link = f"https:{h}"
+            elif h.startswith("http://") or h.startswith("https://"):
+                link = h
+            else:
+                link = f"https://{h}"
+
+    # Get default branch
+    default_branch = "main"
+    if repo_meta and isinstance(repo_meta.get("default_branch"), str):
+        default_branch = repo_meta.get("default_branch") or "main"
+
+    if not readme_content:
+        return link, []
+
+    # Parse markdown to HTML
+    html = mistune.html(readme_content)
+    
+    # Use BeautifulSoup to extract all <img> tags
+    soup = BeautifulSoup(html, 'html.parser')
+    images = soup.find_all('img')
+    
+    # Extract and normalize URLs
+    image_urls = []
+    for img in images:
+        url = img.get('src', '').strip()
+        alt = img.get('alt', '').strip()
+        if not url:
+            continue
+        
+        original_url = url
+        
+        # Normalize relative URLs
+        if not url.startswith('http://') and not url.startswith('https://'):
+            url = f"https://github.com/{owner}/{name}/raw/{default_branch}/{url.lstrip('./').lstrip('/')}"
+        
+        image_urls.append({'url': url, 'alt': alt, 'original_url': original_url})
+    
+    # Quick pre-filter before fetching
+    filtered_urls = []
+    for item in image_urls:
+        url = item['url']
+        url_lower = url.lower()
+        
+        # Skip known badge domains
+        if any(x in url_lower for x in ['shields.io', 'badge', 'travis-ci.org', 'circleci.com']):
+            continue
+        
+        # Skip videos
+        if any(url_lower.endswith(x) for x in ['.mp4', '.webm', '.mov', '.avi']):
+            continue
+        
+        filtered_urls.append(item)
+    
+    # Helper function to fetch dimensions for a single image
+    def fetch_image_dimensions(item: Dict[str, str]) -> Dict[str, Any]:
+        url = item['url']
+        
+        # Try partial download first (faster, saves bandwidth)
+        try:
+            response = requests.get(url, timeout=5, stream=True, headers={'Range': 'bytes=0-50000'})
+            if response.status_code in (200, 206):  # 206 = Partial Content
+                image_data = BytesIO(response.content)
+                img = Image.open(image_data)
+                return {
+                    **item,
+                    'width': img.width,
+                    'height': img.height,
+                    'error': None
+                }
+        except Exception:
+            pass
+        
+        # Fallback to full download
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            image_data = BytesIO(response.content)
+            img = Image.open(image_data)
+            return {
+                **item,
+                'width': img.width,
+                'height': img.height,
+                'error': None
+            }
+        except Exception as e:
+            return {
+                **item,
+                'width': None,
+                'height': None,
+                'error': str(e)
+            }
+    
+    # Fetch dimensions in parallel (max 10 concurrent requests)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(fetch_image_dimensions, item) for item in filtered_urls]
+        for future in as_completed(futures):
+            results.append(future.result())
+    
+    # Filter by size and aspect ratio
+    gallery: List[Dict[str, Any]] = []
+    for result in results:
+        if result['error']:
+            print(f"[debug] Failed to get dimensions for {result['url']}: {result['error']}")
+            continue
+        
+        width = result['width']
+        height = result['height']
+        
+        if not width or not height:
+            continue
+        
+        aspect_ratio = width / height
+        
+        # Must be reasonably large and rectangular-ish
+        if width >= 400 and 0.3 <= aspect_ratio <= 4.0:
+            taken_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+            gallery.append({
+                'url': result['url'],
+                'alt': result['alt'],
+                'width': width,
+                'height': height,
+                'original_url': result['original_url'],
+                'taken_at': taken_at,
+                'is_highlight': True,
+            })
+        else:
+            # Log filtered images for debugging
+            reasons = []
+            if width < 400:
+                reasons.append(f"too small (width={width}px)")
+            if aspect_ratio < 0.3:
+                reasons.append(f"too tall (aspect={aspect_ratio:.2f})")
+            if aspect_ratio > 4.0:
+                reasons.append(f"too wide (aspect={aspect_ratio:.2f})")
+            print(f"[debug] Filtered out {result['url']}: {', '.join(reasons)} ({width}x{height})")
+    
+    return link, gallery
+
+
 def enhance_repo_media(repo_id: str) -> None:
     """Enhance a single repo subject with link and gallery extracted from README.
 
@@ -582,59 +759,8 @@ def enhance_repo_media(repo_id: str) -> None:
         conn.commit()
         return
 
-    client = GitHubClient()
-
-    # Fetch README content and repo metadata
-    readme_content, _ = client.get_repo_readme(owner, name)
-    repo_meta = None
-    try:
-        repo_meta = client.get_repo(owner, name)
-    except Exception:
-        repo_meta = None
-
-    # Link
-    link = None
-    if repo_meta:
-        homepage = repo_meta.get("homepage")
-        if isinstance(homepage, str) and homepage.strip():
-            h = homepage.strip()
-            if h.startswith("//"):
-                link = f"https:{h}"
-            elif h.startswith("http://") or h.startswith("https://"):
-                link = h
-            else:
-                link = f"https://{h}"
-
-    # Default branch
-    default_branch = "main"
-    if repo_meta and isinstance(repo_meta.get("default_branch"), str):
-        default_branch = repo_meta.get("default_branch") or "main"
-
-    # Gallery: simple markdown image extractor
-    import re
-
-    gallery: List[Dict[str, Any]] = []
-    if readme_content:
-        pattern = r"!\[([^\]]*)\]\(([^)]+)\)"
-        for match in re.findall(pattern, readme_content):
-            alt_text, url = match
-            u = (url or "").strip()
-            lower = u.lower()
-            # Skip badges/videos
-            if any(x in lower for x in ["shields.io", "badge", "actions/workflows", ".mp4", ".webm", ".mov"]):
-                continue
-            # Normalize to absolute raw URL when relative
-            if not (u.startswith("http://") or u.startswith("https://")):
-                u = f"https://github.com/{owner}/{name}/raw/{default_branch}/{u.lstrip('./').lstrip('/')}"
-            # Add minimal new fields with defaults
-            taken_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-            gallery.append({
-                "alt": alt_text.strip(),
-                "url": u,
-                "original_url": url,
-                "taken_at": taken_at,
-                "is_highlight": True,
-            })
+    # Extract media data
+    link, gallery = _extract_repo_media_data(owner, name)
 
     # Merge into repo subject
     repo = get_repo_subject(conn, repo_id)
