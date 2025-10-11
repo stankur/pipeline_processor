@@ -564,6 +564,78 @@ def infer_user_theme(username: str) -> None:
     print(f"[task] infer_user_theme done username={username} theme_len={len(theme)} highlights={len(highlights)}")
 
 
+def _capture_website_screenshot(url: str) -> Optional[bytes]:
+    """Capture screenshot of website using ScreenshotOne API.
+    
+    Args:
+        url: Website URL to screenshot
+    
+    Returns:
+        Screenshot image bytes, or None if failed
+    """
+    try:
+        import requests
+        
+        access_key = os.environ.get('SCREENSHOTONE_ACCESS_KEY', '').strip()
+        if not access_key:
+            print(f"[debug] SCREENSHOTONE_ACCESS_KEY not set, skipping screenshot")
+            return None
+        
+        # Build ScreenshotOne API request
+        api_url = "https://api.screenshotone.com/take"
+        params = {
+            'access_key': access_key,
+            'url': url,
+            'viewport_width': 1280,
+            'viewport_height': 720,
+            'device_scale_factor': 1,
+            'format': 'png',
+            'block_ads': True,
+            'block_cookie_banners': True,
+            'delay': 4,  # Wait 2 seconds for page to render
+        }
+        
+        response = requests.get(api_url, params=params, timeout=30)
+        response.raise_for_status()
+        
+        return response.content
+    except Exception as e:
+        print(f"[debug] Failed to screenshot {url}: {e}")
+        return None
+
+
+def _upload_to_cloudinary(image_bytes: bytes, public_id: str) -> Optional[str]:
+    """Upload image to Cloudinary and return URL.
+    
+    Args:
+        image_bytes: Image data
+        public_id: Cloudinary public ID for the image
+    
+    Returns:
+        Cloudinary secure URL, or None if failed
+    """
+    try:
+        import cloudinary
+        import cloudinary.uploader
+        
+        # Configure Cloudinary (idempotent)
+        cloudinary.config(
+            cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
+            api_key=os.environ.get('CLOUDINARY_API_KEY'),
+            api_secret=os.environ.get('CLOUDINARY_API_SECRET')
+        )
+        
+        result = cloudinary.uploader.upload(
+            image_bytes,
+            public_id=public_id,
+            folder="repo_screenshots"
+        )
+        return result['secure_url']
+    except Exception as e:
+        print(f"[debug] Failed to upload to Cloudinary: {e}")
+        return None
+
+
 def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List[Dict[str, Any]]]:
     """Extract demo images from repo README by checking actual dimensions.
     
@@ -737,6 +809,33 @@ def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List
             if aspect_ratio > 4.0:
                 reasons.append(f"too wide (aspect={aspect_ratio:.2f})")
             print(f"[debug] Filtered out {result['url']}: {', '.join(reasons)} ({width}x{height})")
+    
+    # If no images found but has homepage link, capture screenshot
+    if not gallery and link:
+        print(f"[debug] No README images found, attempting to screenshot website: {link}")
+        screenshot_bytes = _capture_website_screenshot(link)
+        
+        if screenshot_bytes:
+            # Upload to Cloudinary
+            public_id = f"{owner}_{name}".replace("/", "_")
+            cloudinary_url = _upload_to_cloudinary(screenshot_bytes, public_id)
+            
+            if cloudinary_url:
+                taken_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+                gallery.append({
+                    'url': cloudinary_url,
+                    'alt': f'Screenshot of {link}',
+                    'width': 1280,
+                    'height': 720,
+                    'original_url': link,
+                    'taken_at': taken_at,
+                    'is_highlight': True,
+                })
+                print(f"[debug] Successfully captured and uploaded screenshot: {cloudinary_url}")
+            else:
+                print(f"[debug] Failed to upload screenshot to Cloudinary")
+        else:
+            print(f"[debug] Failed to capture screenshot")
     
     return link, gallery
 
