@@ -18,7 +18,7 @@ class GalleryImage(BaseModel):
     title: str = ""
     caption: str = ""
     is_highlight: bool = True
-    taken_at: int  # epoch milliseconds
+    taken_at: int = 0  # epoch milliseconds, 0 if unknown
 
 
 # -------------------- Subject Models --------------------
@@ -64,6 +64,13 @@ class RepoSubject(BaseModel):
     emphasis: Optional[list[str]] = None  # from extract_repo_emphasis
     keywords: Optional[list[str]] = None  # from extract_repo_keywords
     kind: Optional[str] = None  # from extract_repo_kind
+
+
+class ForYouRepoItem(RepoSubject):
+    """Repository item in the for-you feed, includes repo data plus metadata."""
+    
+    username: str  # The user this repo is associated with
+    is_ghost: bool = False  # Whether the associated user is a ghost
 
 
 # -------------------- Work Item Output Models --------------------

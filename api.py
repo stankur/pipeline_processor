@@ -24,7 +24,7 @@ from db import (
     upsert_repo_subject,
 )
 from defs import all_assets, asset_meta, defs as dag_defs
-from models import UserSubject, RepoSubject, GalleryImage
+from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
 
 
 app = Flask(__name__)
@@ -403,7 +403,7 @@ def for_you(viewer_username: str):
             continue
 
     # Build feed
-    feed: list[tuple[float, dict]] = []  # (subjects.updated_at, repo_json_with_username)
+    feed: list[tuple[float, ForYouRepoItem]] = []  # (github_timestamp, repo_item)
 
     for username, names in user_to_highlight_names.items():
         repo_rows = get_user_repos(conn, username)
@@ -416,9 +416,9 @@ def for_you(viewer_username: str):
                 continue
             try:
                 repo = RepoSubject.model_validate_json(data_json)
-                # Stash parsed object alongside the row for selection
+                # Stash parsed Pydantic model alongside the row for selection
                 name_to_candidates.setdefault(repo.name, []).append({
-                    "obj": repo.model_dump(),
+                    "obj": repo,
                     "row": r,
                 })
             except Exception:
@@ -444,26 +444,34 @@ def for_you(viewer_username: str):
                 return (days_val, external_flag, upd)
 
             best = max(candidates, key=_selection_key)
-            obj = dict(best["obj"])  # copy to avoid mutating cached
-            obj["username"] = username
-            obj["is_ghost"] = user_to_is_ghost.get(username, False)
-            upd = best["row"].get("updated_at") or 0
-            feed.append((upd, obj))
+            repo_model: RepoSubject = best["obj"]
+            
+            ts_str = repo_model.pushed_at or repo_model.updated_at
+            if not ts_str:
+                raise ValueError(f"Missing pushed_at/updated_at for repo {repo_model.id}")
+            
+            dt = datetime.fromisoformat(ts_str)
+            github_ts = dt.timestamp()
+            
+            # Create ForYouRepoItem with metadata
+            feed_item = ForYouRepoItem(
+                **repo_model.model_dump(),
+                username=username,
+                is_ghost=user_to_is_ghost.get(username, False),
+            )
+            
+            feed.append((github_ts, feed_item))
 
-    # Sort by subjects.updated_at descending
     feed.sort(key=lambda t: t[0], reverse=True)
 
     # Deduplicate by canonical repo id (owner/repo), keep the first (most recent)
     seen: set[str] = set()
     repos: list[dict] = []
-    for _, obj in feed:
-        rid = obj.get("id") if isinstance(obj, dict) else None
-        if not isinstance(rid, str) or not rid:
+    for _, feed_item in feed:
+        if feed_item.id in seen:
             continue
-        if rid in seen:
-            continue
-        seen.add(rid)
-        repos.append(obj)
+        seen.add(feed_item.id)
+        repos.append(feed_item.model_dump())
     return jsonify({"repos": repos})
 
 

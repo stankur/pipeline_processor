@@ -1,5 +1,6 @@
 import time
 import os
+from datetime import datetime
 from psycopg import connect, Connection, Error
 from psycopg.rows import dict_row
 from models import UserSubject, RepoSubject
@@ -107,17 +108,33 @@ def get_user_repos(conn: Connection, username: str) -> list[dict]:
     """List all repo subject rows linked to username via user_repo_links.
 
     Returns rows with columns: subject_id, data_json, updated_at, include_reason, user_commit_days
+    Sorted by GitHub's pushed_at timestamp (descending)
     """
-    return conn.execute(
+    rows = conn.execute(
         """
         SELECT s.subject_id, s.data_json, s.updated_at, l.include_reason, l.user_commit_days
         FROM user_repo_links l
         JOIN subjects s ON s.subject_type='repo' AND s.subject_id = l.repo_id
         WHERE l.username = %s
-        ORDER BY s.updated_at DESC
         """,
         (username,),
     ).fetchall()
+    
+    # Sort by GitHub's pushed_at from the JSON (strict - will raise if data is malformed)
+    def get_github_timestamp(row: dict) -> float:
+        data_json = row.get("data_json")
+        if not data_json:
+            raise ValueError(f"Missing data_json for repo {row.get('subject_id')}")
+        
+        repo = RepoSubject.model_validate_json(data_json)
+        ts_str = repo.pushed_at or repo.updated_at
+        if not ts_str:
+            raise ValueError(f"Missing pushed_at/updated_at for repo {repo.id}")
+        
+        dt = datetime.fromisoformat(ts_str)
+        return dt.timestamp()
+    
+    return sorted(rows, key=get_github_timestamp, reverse=True)
 
 
 
