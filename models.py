@@ -133,3 +133,19 @@ class ExtractRepoKindOutput(BaseModel):
 
     kind: str
 
+
+# -------------------- Recommendation Model --------------------
+
+
+class Recommendation(BaseModel):
+    """Recommendation row from recommendations table."""
+    
+    user_id: str
+    item_type: str
+    item_id: str
+    include: Optional[bool] = None
+    judged_at: Optional[float] = None  # epoch seconds
+    times_shown: int = 0
+    last_shown_at: Optional[float] = None  # epoch seconds
+    judgment_fingerprint: Optional[str] = None  # Hash of user prompt + model config
+

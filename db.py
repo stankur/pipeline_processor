@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from psycopg import connect, Connection, Error
 from psycopg.rows import dict_row
-from models import UserSubject, RepoSubject
+from models import UserSubject, RepoSubject, Recommendation
 
 
 def get_conn() -> Connection:
@@ -18,6 +18,37 @@ def get_conn() -> Connection:
     )
     conn = connect(dsn, row_factory=dict_row)
     return conn
+
+
+def migrate_db() -> None:
+    """Run database migrations for existing tables (idempotent)."""
+    conn = get_conn()
+    
+    # Migration 1: Rename user_fingerprint -> judgment_fingerprint
+    result = conn.execute("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='recommendations' AND column_name='user_fingerprint'
+    """).fetchone()
+    
+    if result:
+        print("[db] Running migration: rename user_fingerprint -> judgment_fingerprint")
+        conn.execute("ALTER TABLE recommendations RENAME COLUMN user_fingerprint TO judgment_fingerprint")
+        conn.commit()
+    
+    # Migration 2: Drop old prompt_hash column if exists
+    result = conn.execute("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='recommendations' AND column_name='prompt_hash'
+    """).fetchone()
+    
+    if result:
+        print("[db] Running migration: drop prompt_hash column")
+        conn.execute("ALTER TABLE recommendations DROP COLUMN prompt_hash")
+        conn.commit()
+    
+    print("[db] Migrations complete")
 
 
 def init_db() -> None:
@@ -67,7 +98,27 @@ def init_db() -> None:
         );
         """
     )
+    # Recommendations table: merged judgment + exposure + fingerprints
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recommendations (
+          user_id               TEXT NOT NULL,
+          item_type             TEXT NOT NULL,   -- 'repo' (future: 'article', etc.)
+          item_id               TEXT NOT NULL,   -- native id, e.g. 'owner/repo'
+          include               BOOLEAN,         -- cached boolean judgment from LLM
+          judged_at             REAL,            -- epoch seconds
+          times_shown           INTEGER DEFAULT 0,
+          last_shown_at         REAL,            -- epoch seconds, nullable
+          judgment_fingerprint  TEXT,            -- Hash of user prompt + model config
+          PRIMARY KEY (user_id, item_type, item_id)
+        );
+        """
+    )
     conn.commit()
+    
+    # Run migrations after table creation
+    migrate_db()
+    
     print(f"[db] init_db done")
 
 
@@ -135,6 +186,69 @@ def get_user_repos(conn: Connection, username: str) -> list[dict]:
         return dt.timestamp()
     
     return sorted(rows, key=get_github_timestamp, reverse=True)
+
+
+def select_best_repo_candidate(
+    candidates: list[tuple[RepoSubject, dict]], author_username: str
+) -> tuple[RepoSubject, dict]:
+    """Select the best repo from candidates with same name.
+    
+    Selection criteria (in order of priority):
+    1. Highest user_commit_days (None treated as -1)
+    2. Prefer external original (owner != author_username)
+    3. Newest subjects.updated_at timestamp
+    
+    Args:
+        candidates: List of (RepoSubject, row_dict) tuples
+        author_username: Username of the author to compare against
+        
+    Returns:
+        tuple: (best_repo, best_row) - the selected candidate
+    """
+    def _selection_key(pair: tuple[RepoSubject, dict]) -> tuple:
+        repo, row = pair
+        subj_id = row.get("subject_id") or ""
+        owner = subj_id.split("/", 1)[0] if "/" in subj_id else ""
+        # Primary: user_commit_days (None -> -1)
+        days = row.get("user_commit_days")
+        days_val = days if isinstance(days, int) else -1
+        # Secondary: prefer external (owner != author) -> rank 1
+        external_flag = 1 if owner != author_username else 0
+        # Tertiary: newer updated_at
+        upd = row.get("updated_at") or 0
+        return (days_val, external_flag, upd)
+    
+    return max(candidates, key=_selection_key)
+
+
+def iter_users_with_highlights(conn: Connection):
+    """Yield (username, UserSubject) for users with highlighted_repos.
+    
+    Queries all user subjects and yields only those with at least one highlighted repo.
+    Skips invalid JSON or users without highlights.
+    
+    Yields:
+        tuple: (username, UserSubject) pairs
+    """
+    rows = conn.execute(
+        "SELECT subject_id, data_json FROM subjects WHERE subject_type='user'"
+    ).fetchall()
+    
+    for row in rows:
+        if not row.get("data_json"):
+            continue
+        try:
+            user = UserSubject.model_validate_json(row["data_json"])
+        except Exception:
+            continue
+        if not user.highlighted_repos:
+            continue
+        
+        username = str(row.get("subject_id") or "").strip()
+        if not username:
+            continue
+        
+        yield (username, user)
 
 
 
@@ -415,3 +529,102 @@ def get_repo_subject(conn: Connection, repo_id: str) -> RepoSubject | None:
     except Exception as e:
         print(f"[db] get_repo_subject validation error repo={repo_id} err={e}")
         return None
+
+
+# -------------------- Recommendations (For You feed) --------------------
+
+
+def get_recommendation(conn: Connection, user_id: str, item_type: str, item_id: str) -> Recommendation | None:
+    """Fetch a single recommendation row or None."""
+    row = conn.execute(
+        "SELECT user_id, item_type, item_id, include, judged_at, times_shown, last_shown_at, judgment_fingerprint "
+        "FROM recommendations WHERE user_id=%s AND item_type=%s AND item_id=%s",
+        (user_id, item_type, item_id),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return Recommendation.model_validate(row)
+    except Exception as e:
+        print(f"[db] get_recommendation validation error user={user_id} type={item_type} id={item_id} err={e}")
+        return None
+
+
+def get_cached_recommendations(conn: Connection, user_id: str) -> list[Recommendation]:
+    """Fetch all cached recommendations for a user where include=true.
+    
+    Returns only items that have been judged and marked for inclusion.
+    Used for fast feed rendering without re-judging candidates.
+    """
+    rows = conn.execute(
+        "SELECT user_id, item_type, item_id, include, judged_at, times_shown, last_shown_at, judgment_fingerprint "
+        "FROM recommendations WHERE user_id=%s AND include=true",
+        (user_id,)
+    ).fetchall()
+    
+    recommendations = []
+    for row in rows:
+        try:
+            recommendations.append(Recommendation.model_validate(row))
+        except Exception as e:
+            print(f"[db] get_cached_recommendations validation error user={user_id} item={row.get('item_id')} err={e}")
+            continue
+    
+    return recommendations
+
+
+def upsert_recommendation_judgment(
+    conn: Connection,
+    user_id: str,
+    item_type: str,
+    item_id: str,
+    include: bool,
+    judgment_fingerprint: str,
+    judged_at: float | None = None,
+) -> None:
+    """Insert or update a recommendation judgment (preserves exposure counters)."""
+    judged_at = judged_at or time.time()
+    try:
+        print(f"[db] upsert_recommendation_judgment user={user_id} type={item_type} id={item_id} include={include}")
+        conn.execute(
+            """
+            INSERT INTO recommendations(user_id, item_type, item_id, include, judged_at, times_shown, judgment_fingerprint)
+            VALUES (%s, %s, %s, %s, %s, 0, %s)
+            ON CONFLICT(user_id, item_type, item_id)
+            DO UPDATE SET 
+              include=excluded.include,
+              judged_at=excluded.judged_at,
+              judgment_fingerprint=excluded.judgment_fingerprint
+            """,
+            (user_id, item_type, item_id, include, judged_at, judgment_fingerprint),
+        )
+        print(f"[db] upsert_recommendation_judgment ok user={user_id} type={item_type} id={item_id}")
+    except Error as e:
+        print(f"[db] upsert_recommendation_judgment error user={user_id} type={item_type} id={item_id} err={e}")
+        raise
+
+
+def bump_recommendation_exposures(
+    conn: Connection,
+    user_id: str,
+    items: list[tuple[str, str]],  # (item_type, item_id)
+    now_epoch: float | None = None,
+) -> None:
+    """Increment times_shown and update last_shown_at for shown items."""
+    now_epoch = now_epoch or time.time()
+    for item_type, item_id in items:
+        try:
+            conn.execute(
+                """
+                INSERT INTO recommendations(user_id, item_type, item_id, include, judged_at, times_shown, last_shown_at)
+                VALUES (%s, %s, %s, NULL, NULL, 1, %s)
+                ON CONFLICT(user_id, item_type, item_id)
+                DO UPDATE SET 
+                  times_shown = COALESCE(recommendations.times_shown, 0) + 1,
+                  last_shown_at = excluded.last_shown_at
+                """,
+                (user_id, item_type, item_id, now_epoch),
+            )
+        except Error as e:
+            print(f"[db] bump_recommendation_exposures error user={user_id} type={item_type} id={item_id} err={e}")
+            # continue on error so partial bump succeeds

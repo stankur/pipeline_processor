@@ -43,3 +43,28 @@ repo_similarity_prompt: |
 
     repo at hand:
     {target_repo}
+
+for_you_user_prompt: |
+    User:
+    {username}
+    {bio}
+
+    user's highlighted repositories:
+    {highlights}
+
+for_you_full_prompt: |
+    Decide if this item should be included in a for you feed for the user.
+    Return strict JSON: {{"include": true}} or {{"include": false}}
+
+    {user_prompt}
+
+    Item:
+    {name}
+    {author}
+    {description}
+    {generated_description}
+    {language}
+
+    Rules:
+    - include = true if the user might find this item useful or interesting, considering the user's domain of interest, engineering wise and vision wise, from the highlighted repos.
+    - if unsure, include = false.

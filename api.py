@@ -25,6 +25,7 @@ from db import (
 )
 from defs import all_assets, asset_meta, defs as dag_defs
 from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
+from feed.rank import build_feed_for_user, get_feed_from_cache
 
 
 app = Flask(__name__)
@@ -368,111 +369,38 @@ def progress(username: str):
 
 @app.get("/for-you/<viewer_username>")
 def for_you(viewer_username: str):
-    """Return a simple For You feed built from user-subject highlights.
-
-    Implementation details (mock, non-personalized):
-      - Read ONLY user subjects where data_json.highlighted_repos is a non-empty list.
-      - For each such user, resolve highlighted names to that user's repos via get_user_repos.
-      - If multiple repos share the same name for a user, select by:
-          1) highest user_commit_days (None treated as -1)
-          2) if tied, prefer external original (owner != username)
-          3) if still tied, newest subjects.updated_at
-      - Flatten across users and sort by subjects.updated_at desc.
-      - Each repo object is EXACTLY the stored repo subject JSON, plus an added "username" field.
+    """Fast For You feed from cached recommendations.
+    
+    Query params:
+      - limit: max items to return (default 30)
+    
+    Returns personalized feed using LLM judgments and fatigue ranking.
+    Use POST to rebuild/populate cache.
     """
     conn = get_conn()
+    limit = int((request.args.get("limit") or "30").strip() or "30")
+    items = get_feed_from_cache(conn, viewer_username, limit=limit)
+    return jsonify({"repos": [item.model_dump() for item in items]})
 
-    # Discover users with highlighted_repos on their user subject
-    user_rows = conn.execute(
-        "SELECT subject_id, data_json FROM subjects WHERE subject_type='user'"
-    ).fetchall()
 
-    user_to_highlight_names: dict[str, list[str]] = {}
-    user_to_is_ghost: dict[str, bool] = {}
-    for row in user_rows:
-        if not row.get("data_json"):
-            continue
-        try:
-            user = UserSubject.model_validate_json(row["data_json"])
-            if user.highlighted_repos:
-                username = str(row.get("subject_id") or "").strip()
-                if username:
-                    user_to_highlight_names[username] = user.highlighted_repos
-                    user_to_is_ghost[username] = user.is_ghost
-        except Exception:
-            continue
-
-    # Build feed
-    feed: list[tuple[float, ForYouRepoItem]] = []  # (github_timestamp, repo_item)
-
-    for username, names in user_to_highlight_names.items():
-        repo_rows = get_user_repos(conn, username)
-
-        # Index candidate repos by bare name
-        name_to_candidates: dict[str, list[dict]] = {}
-        for r in repo_rows:
-            data_json = r.get("data_json")
-            if not data_json:
-                continue
-            try:
-                repo = RepoSubject.model_validate_json(data_json)
-                # Stash parsed Pydantic model alongside the row for selection
-                name_to_candidates.setdefault(repo.name, []).append({
-                    "obj": repo,
-                    "row": r,
-                })
-            except Exception:
-                continue
-
-        for repo_name in names:
-            candidates = name_to_candidates.get(repo_name)
-            if not candidates:
-                continue
-
-            def _selection_key(cand: dict) -> tuple:
-                r = cand["row"]
-                subj_id = r.get("subject_id") or ""
-                owner = subj_id.split("/", 1)[0] if "/" in subj_id else ""
-                # Primary: user_commit_days (None -> -1)
-                days = r.get("user_commit_days")
-                days_val = days if isinstance(days, int) else -1
-                # Secondary: prefer external original (owner != username) -> rank 1,
-                #            owned (owner == username) -> rank 0; we want external preferred, so external=1.
-                external_flag = 1 if owner != username else 0
-                # Tertiary: newer updated_at
-                upd = r.get("updated_at") or 0
-                return (days_val, external_flag, upd)
-
-            best = max(candidates, key=_selection_key)
-            repo_model: RepoSubject = best["obj"]
-            
-            ts_str = repo_model.pushed_at or repo_model.updated_at
-            if not ts_str:
-                raise ValueError(f"Missing pushed_at/updated_at for repo {repo_model.id}")
-            
-            dt = datetime.fromisoformat(ts_str)
-            github_ts = dt.timestamp()
-            
-            # Create ForYouRepoItem with metadata
-            feed_item = ForYouRepoItem(
-                **repo_model.model_dump(),
-                username=username,
-                is_ghost=user_to_is_ghost.get(username, False),
-            )
-            
-            feed.append((github_ts, feed_item))
-
-    feed.sort(key=lambda t: t[0], reverse=True)
-
-    # Deduplicate by canonical repo id (owner/repo), keep the first (most recent)
-    seen: set[str] = set()
-    repos: list[dict] = []
-    for _, feed_item in feed:
-        if feed_item.id in seen:
-            continue
-        seen.add(feed_item.id)
-        repos.append(feed_item.model_dump())
-    return jsonify({"repos": repos})
+@app.post("/for-you/<viewer_username>")
+def build_for_you(viewer_username: str):
+    """Build For You feed by judging candidates (slow, populates cache).
+    
+    Query params:
+      - limit: max items to evaluate (default 30)
+    
+    Fetches candidates and runs LLM judgments to populate cache.
+    Use this periodically to refresh feed (e.g., every 10 minutes).
+    """
+    conn = get_conn()
+    limit = int((request.args.get("limit") or "30").strip() or "30")
+    items = build_feed_for_user(conn, viewer_username, limit=limit)
+    return jsonify({
+        "status": "completed",
+        "judged": len(items),
+        "repos": [item.model_dump() for item in items]
+    })
 
 
 @app.post("/users/<username>/repos/<owner>/<repo>/gallery")

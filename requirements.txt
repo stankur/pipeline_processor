@@ -14,3 +14,4 @@ mistune
 beautifulsoup4
 Pillow
 cloudinary
+tenacity

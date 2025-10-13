@@ -113,12 +113,18 @@ curl http://localhost:8080/users/stankur/data
 ### For You feed
 
 ```bash
+# Fast feed from cache (with fatigue ranking)
 curl http://localhost:8080/for-you/<viewer_username>
+
+# Rebuild feed (runs LLM judgments, populates cache)
+curl -X POST http://localhost:8080/for-you/<viewer_username>
 ```
 
--   Returns a feed built from all users' `highlighted_repos`.
--   Each repo includes `username` (owner) and `is_ghost` (whether user is inactive).
--   Sorted by repo subject `updated_at` descending. No pagination/limits (for now).
+-   Returns personalized feed with LLM judgments and fatigue ranking.
+-   Candidates from all users' `highlighted_repos`, excluding viewer's own repos.
+-   Uses exposure tracking to avoid repetitive items.
+-   Each repo includes `username` (author) and `is_ghost` (whether author is inactive).
+-   Default limit: 30 repos (add `?limit=N` to customize).
 
 ### Repo gallery management
 

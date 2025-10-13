@@ -89,9 +89,13 @@ progress user="stankur":
 data user="stankur":
     @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/data || curl http://localhost:8080/users/{{user}}/data
 
-# For You feed (mock, non-personalized)
-for-you user="stankur":
-    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/for-you/{{user}} || curl http://localhost:8080/for-you/{{user}}
+# For You feed - fast (from cached recommendations)
+for-you user="stankur" limit="30":
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you/{{user}}?limit={{limit}}" | jq || curl "http://localhost:8080/for-you/{{user}}?limit={{limit}}" | jq
+
+# Rebuild for-you feed - slow (runs LLM judgments, populates cache)
+for-you-build user="stankur" limit="30":
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you/{{user}}?limit={{limit}}" | jq || curl -X POST "http://localhost:8080/for-you/{{user}}?limit={{limit}}" | jq
 
 # Restart from a specific asset key (and downstream)
 restart-from user="stankur" start="generate_repo_blurb_asset":
