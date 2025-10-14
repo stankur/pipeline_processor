@@ -3,11 +3,18 @@ from __future__ import annotations
 from typing import Iterator, Tuple
 from datetime import datetime
 from psycopg import Connection
-from models import UserSubject, RepoSubject
-from db import get_user_repos, select_best_repo_candidate, iter_users_with_highlights
+from models import UserSubject, RepoSubject, ItemType
+from db import (
+    get_user_repos,
+    select_best_repo_candidate,
+    iter_users_with_highlights,
+    get_user_subject,
+    get_user_languages,
+    get_trending_repos_by_languages,
+)
 
 # Item tuple: (item_type, item_id, repo_model, author_username, github_timestamp)
-Item = Tuple[str, str, RepoSubject, str, float]
+Item = Tuple[ItemType, str, RepoSubject, str, float]
 
 
 def iter_highlight_repo_candidates(conn: Connection, viewer_username: str) -> Iterator[Item]:
@@ -63,4 +70,63 @@ def iter_highlight_repo_candidates(conn: Connection, viewer_username: str) -> It
                 continue
             
             yield ("repo", repo.id, repo, author_username, github_ts)
+
+
+def iter_trending_repo_candidates(conn: Connection, viewer_username: str) -> Iterator[Item]:
+    """Yield trending repo candidates filtered by viewer's languages.
+    
+    Yields repos from subjects table with subject_type='trending_repo' that match
+    any language used in the viewer's highlighted repos.
+    
+    Yields:
+        - item_type: 'trending_repo'
+        - item_id: repo.id (owner/repo)
+        - repo_model: RepoSubject
+        - author_username: owner extracted from repo.id
+        - github_timestamp: extracted_at as epoch seconds
+    """
+    # Get viewer's user subject to access highlighted repos
+    user = get_user_subject(conn, viewer_username)
+    if not user or not user.highlighted_repos:
+        print(f"[sources] iter_trending_repo_candidates: no highlighted repos for {viewer_username}")
+        return
+    
+    # Extract languages from viewer's repos using db function
+    languages = get_user_languages(conn, viewer_username)
+    
+    if not languages:
+        print(f"[sources] iter_trending_repo_candidates: no languages found for {viewer_username}")
+        return
+    
+    print(f"[sources] iter_trending_repo_candidates: viewer languages={languages}")
+    
+    # Query trending repos matching viewer's languages using db function
+    rows = get_trending_repos_by_languages(conn, languages)
+    
+    for row in rows:
+        repo_id = row["subject_id"]
+        data_json = row.get("data_json")
+        if not data_json:
+            continue
+        
+        try:
+            repo = RepoSubject.model_validate_json(data_json)
+        except Exception:
+            continue
+        
+        # Trending repos must have extracted_at
+        if not repo.extracted_at:
+            print(f"[sources] ERROR: Trending repo {repo.id} missing extracted_at, skipping")
+            continue
+        
+        try:
+            github_ts = datetime.fromisoformat(repo.extracted_at).timestamp()
+        except Exception as e:
+            print(f"[sources] ERROR: Invalid extracted_at for {repo.id}: {e}")
+            continue
+        
+        # Extract owner from repo.id (e.g., "anthropics/prompt-eng-interactive-tutorial")
+        owner = repo.id.split('/')[0] if '/' in repo.id else ""
+        
+        yield ("trending_repo", repo.id, repo, owner, github_ts)
 

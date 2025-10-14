@@ -6,6 +6,11 @@ from typing import Optional, Literal
 from pydantic import BaseModel, Field
 
 
+# -------------------- Type Aliases --------------------
+
+ItemType = Literal["repo", "trending_repo"]
+
+
 # -------------------- Gallery Image --------------------
 
 
@@ -56,6 +61,9 @@ class RepoSubject(BaseModel):
     pushed_at: Optional[str] = None
     updated_at: Optional[str] = None
     topics: list[str] = Field(default_factory=list)
+    
+    # Metadata fields
+    extracted_at: Optional[str] = None  # ISO timestamp of when we scraped/fetched this data
 
     # Enhanced fields (added by tasks)
     link: Optional[str] = None  # from enhance_repo_media
@@ -141,7 +149,7 @@ class Recommendation(BaseModel):
     """Recommendation row from recommendations table."""
     
     user_id: str
-    item_type: str
+    item_type: ItemType
     item_id: str
     include: Optional[bool] = None
     judged_at: Optional[float] = None  # epoch seconds

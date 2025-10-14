@@ -403,6 +403,42 @@ def build_for_you(viewer_username: str):
     })
 
 
+@app.get("/for-you-trending/<viewer_username>")
+def for_you_trending(viewer_username: str):
+    """Fast trending feed from cached recommendations.
+    
+    Query params:
+      - limit: max items to return (default 30)
+    
+    Returns personalized trending feed using cached LLM judgments and fatigue ranking.
+    Use POST to rebuild/populate cache.
+    """
+    conn = get_conn()
+    limit = int((request.args.get("limit") or "30").strip() or "30")
+    items = get_feed_from_cache(conn, viewer_username, source="trending", limit=limit)
+    return jsonify({"repos": [item.model_dump() for item in items]})
+
+
+@app.post("/for-you-trending/<viewer_username>")
+def build_for_you_trending(viewer_username: str):
+    """Build trending feed by fetching/judging trending repos (slow, populates cache).
+    
+    Query params:
+      - limit: max items to evaluate (default 30)
+    
+    Fetches trending repos from GitHub (if stale), filters by user's languages,
+    runs LLM judgments to populate cache. Returns top ranked items.
+    """
+    conn = get_conn()
+    limit = int((request.args.get("limit") or "30").strip() or "30")
+    items = build_feed_for_user(conn, viewer_username, source="trending", limit=limit)
+    return jsonify({
+        "status": "completed",
+        "judged": len(items),
+        "repos": [item.model_dump() for item in items]
+    })
+
+
 @app.post("/users/<username>/repos/<owner>/<repo>/gallery")
 def add_repo_gallery_images(username: str, owner: str, repo: str):
     """Append one or more images to a repo's gallery, creating the subject if missing.

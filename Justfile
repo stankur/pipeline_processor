@@ -97,6 +97,14 @@ for-you user="stankur" limit="30":
 for-you-build user="stankur" limit="30":
     @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you/{{user}}?limit={{limit}}" | jq || curl -X POST "http://localhost:8080/for-you/{{user}}?limit={{limit}}" | jq
 
+# For You Trending feed - fast (from cached recommendations)
+for-you-trending user="stankur" limit="30":
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you-trending/{{user}}?limit={{limit}}" | jq || curl "http://localhost:8080/for-you-trending/{{user}}?limit={{limit}}" | jq
+
+# Rebuild for-you-trending feed - slow (scrapes GitHub, runs LLM judgments)
+for-you-trending-build user="stankur" limit="30":
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you-trending/{{user}}?limit={{limit}}" | jq || curl -X POST "http://localhost:8080/for-you-trending/{{user}}?limit={{limit}}" | jq
+
 # Restart from a specific asset key (and downstream)
 restart-from user="stankur" start="generate_repo_blurb_asset":
     @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/users/{{user}}/restart-from?start={{start}}" || curl -X POST "http://localhost:8080/users/{{user}}/restart-from?start={{start}}"

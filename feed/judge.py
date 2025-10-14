@@ -11,7 +11,7 @@ from psycopg import Connection
 from utils import parse_llm_json
 from feed.serialize import serialize_user_profile_minimal, serialize_repo_for_llm
 from db import get_recommendation, upsert_recommendation_judgment
-from models import UserSubject, RepoSubject
+from models import UserSubject, RepoSubject, ItemType
 
 
 # LLM Configuration
@@ -136,13 +136,14 @@ def llm_boolean_gate(prompt_text: str) -> bool:
     return include
 
 
-def get_or_create_judgment_for_repo(
+def judge_repo_for_user(
     conn: Connection,
     viewer_user: UserSubject,
     repo: RepoSubject,
     author_username: str,
+    item_type: ItemType = "repo",
 ) -> bool:
-    """Get cached judgment or compute new one via LLM.
+    """Judge repo for user: get cached judgment or compute new one via LLM.
     
     Recomputes if:
     - No cached judgment exists, OR
@@ -155,7 +156,7 @@ def get_or_create_judgment_for_repo(
         bool: True if item should be included in feed, False otherwise
     """
     viewer_username = viewer_user.login
-    item_type, item_id = "repo", repo.id
+    item_id = repo.id
     rec = get_recommendation(conn, viewer_username, item_type, item_id)
     judgment_fp = make_judgment_fingerprint(conn, viewer_user)
     

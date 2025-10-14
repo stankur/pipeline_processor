@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from psycopg import connect, Connection, Error
 from psycopg.rows import dict_row
-from models import UserSubject, RepoSubject, Recommendation
+from models import UserSubject, RepoSubject, Recommendation, ItemType
 
 
 def get_conn() -> Connection:
@@ -534,7 +534,7 @@ def get_repo_subject(conn: Connection, repo_id: str) -> RepoSubject | None:
 # -------------------- Recommendations (For You feed) --------------------
 
 
-def get_recommendation(conn: Connection, user_id: str, item_type: str, item_id: str) -> Recommendation | None:
+def get_recommendation(conn: Connection, user_id: str, item_type: ItemType, item_id: str) -> Recommendation | None:
     """Fetch a single recommendation row or None."""
     row = conn.execute(
         "SELECT user_id, item_type, item_id, include, judged_at, times_shown, last_shown_at, judgment_fingerprint "
@@ -576,7 +576,7 @@ def get_cached_recommendations(conn: Connection, user_id: str) -> list[Recommend
 def upsert_recommendation_judgment(
     conn: Connection,
     user_id: str,
-    item_type: str,
+    item_type: ItemType,
     item_id: str,
     include: bool,
     judgment_fingerprint: str,
@@ -607,7 +607,7 @@ def upsert_recommendation_judgment(
 def bump_recommendation_exposures(
     conn: Connection,
     user_id: str,
-    items: list[tuple[str, str]],  # (item_type, item_id)
+    items: list[tuple[ItemType, str]],  # (item_type, item_id)
     now_epoch: float | None = None,
 ) -> None:
     """Increment times_shown and update last_shown_at for shown items."""
@@ -628,3 +628,112 @@ def bump_recommendation_exposures(
         except Error as e:
             print(f"[db] bump_recommendation_exposures error user={user_id} type={item_type} id={item_id} err={e}")
             # continue on error so partial bump succeeds
+
+
+def get_user_languages(conn: Connection, username: str) -> list[str]:
+    """Extract unique languages from user's repos.
+    
+    Returns list of unique language strings used in all the user's repos.
+    """
+    repo_rows = get_user_repos(conn, username)
+    languages: set[str] = set()
+    
+    for rr in repo_rows:
+        data_json = rr.get("data_json")
+        if not data_json:
+            continue
+        try:
+            repo = RepoSubject.model_validate_json(data_json)
+            if repo.language:
+                languages.add(repo.language)
+        except Exception:
+            continue
+    
+    return list(languages)
+
+
+def get_trending_repos_by_languages(conn: Connection, languages: list[str]) -> list[dict]:
+    """Query trending_repo subjects matching any language in list.
+    
+    Returns list of dicts with keys: subject_id, data_json
+    """
+    if not languages:
+        return []
+    
+    placeholders = ','.join(['%s'] * len(languages))
+    query = f"""
+        SELECT subject_id, data_json
+        FROM subjects
+        WHERE subject_type = 'trending_repo'
+        AND data_json::json->>'language' IN ({placeholders})
+        ORDER BY updated_at DESC
+    """
+    
+    rows = conn.execute(query, tuple(languages)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_newest_trending_repo_age_hours(conn: Connection) -> float | None:
+    """Get age in hours of newest trending_repo subject.
+    
+    Returns None if no trending repos exist.
+    """
+    row = conn.execute(
+        """
+        SELECT MAX(updated_at) as newest
+        FROM subjects
+        WHERE subject_type = 'trending_repo'
+        """
+    ).fetchone()
+    
+    if not row or not row['newest']:
+        return None
+    
+    newest_iso = row['newest']
+    try:
+        from datetime import datetime, timezone
+        newest_dt = datetime.fromisoformat(newest_iso)
+        now = datetime.now(timezone.utc)
+        age_hours = (now - newest_dt).total_seconds() / 3600.0
+        return age_hours
+    except Exception:
+        return None
+
+
+def get_cached_recommendations_by_type(conn: Connection, user_id: str, item_type: ItemType) -> list[Recommendation]:
+    """Get cached recommendations for specific item_type where include=true.
+    
+    Args:
+        user_id: Username
+        item_type: Type filter (e.g., 'repo', 'trending_repo')
+    
+    Returns list of Recommendation objects.
+    """
+    rows = conn.execute(
+        """
+        SELECT user_id, item_type, item_id, include, judged_at, times_shown, last_shown_at, judgment_fingerprint
+        FROM recommendations
+        WHERE user_id = %s AND item_type = %s AND include = TRUE
+        ORDER BY judged_at DESC
+        """,
+        (user_id, item_type)
+    ).fetchall()
+    
+    recommendations = []
+    for row in rows:
+        try:
+            rec = Recommendation(
+                user_id=row['user_id'],
+                item_type=row['item_type'],
+                item_id=row['item_id'],
+                include=row['include'],
+                judged_at=row['judged_at'],
+                times_shown=row['times_shown'],
+                last_shown_at=row['last_shown_at'],
+                judgment_fingerprint=row['judgment_fingerprint'],
+            )
+            recommendations.append(rec)
+        except Exception:
+            continue
+    
+    return recommendations
