@@ -26,6 +26,7 @@ from db import (
 from defs import all_assets, asset_meta, defs as dag_defs
 from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
 from feed.rank import build_feed_for_user, get_feed_from_cache
+from gallery import get_gallery_repos
 
 
 app = Flask(__name__)
@@ -437,6 +438,26 @@ def build_for_you_trending(viewer_username: str):
         "judged": len(items),
         "repos": [item.model_dump() for item in items]
     })
+
+
+@app.get("/gallery")
+def get_gallery():
+    """Get global gallery of highlighted repos with images.
+    
+    Query params:
+      - limit: max items to return (default 30)
+    
+    Returns highlighted repos with gallery images, sorted by recency.
+    No per-user filtering - this is a global gallery visible to all.
+    """
+    conn = get_conn()
+    limit_str = request.args.get("limit", "30")
+    try:
+        limit = int(limit_str)
+    except (ValueError, TypeError):
+        limit = 30
+    repos = get_gallery_repos(conn, limit=limit)
+    return jsonify({"repos": repos})
 
 
 @app.post("/users/<username>/repos/<owner>/<repo>/gallery")

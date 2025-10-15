@@ -737,3 +737,59 @@ def get_cached_recommendations_by_type(conn: Connection, user_id: str, item_type
             continue
     
     return recommendations
+
+
+def get_all_highlighted_repos_with_gallery(conn: Connection) -> list[dict]:
+    """Get all highlighted repos with gallery images from all users.
+    
+    Returns list of dicts with keys: repo_id, repo, author_username, github_timestamp.
+    If multiple users highlight the same repo, attributes it to the first user.
+    """
+    global_repo_map: dict[str, tuple[RepoSubject, dict, str]] = {}
+    
+    for author_username, user in iter_users_with_highlights(conn):
+        repo_rows = get_user_repos(conn, author_username)
+        
+        name_to_candidates: dict[str, list[tuple[RepoSubject, dict]]] = {}
+        for repo_row in repo_rows:
+            data_json = repo_row.get("data_json")
+            if not data_json:
+                continue
+            try:
+                repo = RepoSubject.model_validate_json(data_json)
+            except Exception:
+                continue
+            name_to_candidates.setdefault(repo.name, []).append((repo, repo_row))
+        
+        for repo_name in user.highlighted_repos:
+            candidates = name_to_candidates.get(repo_name)
+            if not candidates:
+                continue
+            
+            repo, repo_row = select_best_repo_candidate(candidates, author_username)
+            
+            if not repo.gallery:
+                continue
+            
+            if repo.id not in global_repo_map:
+                global_repo_map[repo.id] = (repo, repo_row, author_username)
+    
+    results = []
+    for repo_id, (repo, repo_row, author_username) in global_repo_map.items():
+        timestamp_str = repo.pushed_at or repo.updated_at
+        if not timestamp_str:
+            continue
+        
+        try:
+            github_timestamp = datetime.fromisoformat(timestamp_str).timestamp()
+        except Exception:
+            continue
+        
+        results.append({
+            "repo_id": repo_id,
+            "repo": repo,
+            "author_username": author_username,
+            "github_timestamp": github_timestamp,
+        })
+    
+    return results
