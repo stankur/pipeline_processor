@@ -20,6 +20,7 @@ from tasks import (
     extract_repo_keywords,
     extract_repo_kind,
 )
+from feed.rank import build_feed_for_user
 
 class UserConfig(Config):
     username: str
@@ -160,3 +161,35 @@ def extract_repo_kind_asset(config: UserConfig) -> None:
     for row in rows:
         repo_id = row["subject_id"]
         extract_repo_kind(repo_id)
+
+
+@asset(
+    deps=[infer_user_theme_asset, extract_repo_kind_asset],
+    metadata={"work_item_kinds": ["build_for_you_community"], "scope": "user"}
+)
+def build_for_you_community_asset(config: UserConfig) -> None:
+    """Build For You feed from community repos - runs after theme and descriptions."""
+    conn = get_conn()
+    build_feed_for_user(
+        conn,
+        config.username,
+        source="community",
+        sample_n=200,
+        limit=30
+    )
+
+
+@asset(
+    deps=[infer_user_theme_asset, extract_repo_kind_asset],
+    metadata={"work_item_kinds": ["build_for_you_trending"], "scope": "user"}
+)
+def build_for_you_trending_asset(config: UserConfig) -> None:
+    """Build For You trending feed - runs after theme and descriptions."""
+    conn = get_conn()
+    build_feed_for_user(
+        conn,
+        config.username,
+        source="trending",
+        sample_n=200,
+        limit=30
+    )

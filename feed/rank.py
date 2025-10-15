@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import random
 import time
 from typing import Literal
 from datetime import datetime
@@ -111,7 +112,8 @@ def build_feed_for_user(
     conn: Connection,
     viewer_username: str,
     source: Literal["community", "trending"] = "community",
-    limit: int = 30
+    limit: int = 30,
+    sample_n: int | None = None
 ) -> list[ForYouRepoItem]:
     """Build feed for user by judging candidates and ranking with LLM.
     
@@ -147,7 +149,12 @@ def build_feed_for_user(
         candidates = list(iter_highlight_repo_candidates(conn, viewer_username))
     
     now = time.time()
-    print(f"[rank] build_feed_for_user: username={viewer_username} source={source} candidates={len(candidates)}")
+    original_count = len(candidates)
+    print(f"[rank] build_feed_for_user: username={viewer_username} source={source} candidates={original_count}")
+    
+    if sample_n is not None and len(candidates) > sample_n:
+        candidates = random.sample(candidates, sample_n)
+        print(f"[rank] Sampled {sample_n} candidates from {original_count} total")
     
     ranked: list[tuple[float, ForYouRepoItem]] = []
     included_count = 0

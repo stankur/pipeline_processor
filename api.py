@@ -129,6 +129,7 @@ def login(username: str):
         user.is_ghost = False
         upsert_user_subject(conn, username, user)
         conn.commit()
+        _run_worker_async(username)
         return jsonify({
             "ok": True,
             "status": "activated",
@@ -137,6 +138,7 @@ def login(username: str):
         })
     
     print(f"[api] login: existing user username={username}")
+    _run_worker_async(username)
     return jsonify({
         "ok": True,
         "status": "existing",
