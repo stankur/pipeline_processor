@@ -4,8 +4,10 @@ import random
 import time
 from typing import Literal
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg import Connection
 from db import (
+    get_conn,
     get_user_subject,
     get_recommendation,
     bump_recommendation_exposures,
@@ -76,6 +78,53 @@ def _apply_fatigue_and_create_item(
     return (adjusted_ts, feed_item)
 
 
+def _judge_candidate_parallel(
+    viewer_user,
+    viewer_username: str,
+    candidate_tuple: tuple,
+    now: float
+) -> tuple | None:
+    """Judge a single candidate in parallel (thread-safe).
+    
+    Returns:
+        tuple: (adjusted_ts, feed_item, item_type, item_id) if included
+        None: if excluded
+    """
+    item_type, item_id, repo, author_username, github_ts = candidate_tuple
+    
+    # Get fresh connection for this thread (psycopg creates new conn each time)
+    conn = get_conn()
+    
+    try:
+        # Judge the repo (may call LLM or use cache)
+        include = judge_repo_for_user(conn, viewer_user, repo, author_username, item_type)
+        
+        if not include:
+            print(f"[rank]   -> {item_id}: EXCLUDE")
+            return None
+        
+        print(f"[rank]   -> {item_id}: INCLUDE")
+        
+        # Get recommendation and compute fatigue score
+        rec = get_recommendation(conn, viewer_username, item_type, item_id)
+        adjusted_ts, feed_item = _apply_fatigue_and_create_item(
+            repo, author_username, github_ts, rec, now
+        )
+        
+        times_shown = rec.times_shown if rec else 0
+        hours_since = (now - float(rec.last_shown_at)) / 3600.0 if rec and rec.last_shown_at else 1e9
+        penalty_h = _fatigue_penalty_hours(times_shown, hours_since)
+        
+        print(f"[rank]   -> {item_id}: shown={times_shown}x, penalty={penalty_h:.1f}h, score={adjusted_ts:.2f}")
+        
+        return (adjusted_ts, feed_item, item_type, item_id)
+    
+    finally:
+        # Commit this thread's transaction before closing
+        conn.commit()
+        conn.close()
+
+
 def _finalize_ranked_feed(
     ranked: list[tuple[float, ForYouRepoItem]],
     limit: int,
@@ -113,7 +162,8 @@ def build_feed_for_user(
     viewer_username: str,
     source: Literal["community", "trending"] = "community",
     limit: int = 30,
-    sample_n: int | None = None
+    sample_n: int | None = None,
+    batch_size: int = 15
 ) -> list[ForYouRepoItem]:
     """Build feed for user by judging candidates and ranking with LLM.
     
@@ -122,6 +172,8 @@ def build_feed_for_user(
         viewer_username: Username to build feed for
         source: "community" for highlight repos, "trending" for GitHub trending
         limit: Max items to return
+        sample_n: Number of candidates to sample (None = all)
+        batch_size: Number of candidates to judge in parallel per batch
     
     Returns:
         List of ForYouRepoItem sorted by relevance
@@ -160,35 +212,43 @@ def build_feed_for_user(
     included_count = 0
     excluded_count = 0
     
-    for idx, (item_type, item_id, repo, author_username, github_ts) in enumerate(candidates, 1):
-        print(f"[rank] Candidate {idx}/{len(candidates)}: {item_id} (author: @{author_username}, ts: {github_ts})")
+    # Process candidates in batches with parallelism
+    total_batches = (len(candidates) + batch_size - 1) // batch_size
+    
+    for batch_idx in range(0, len(candidates), batch_size):
+        batch = candidates[batch_idx:batch_idx + batch_size]
+        batch_num = (batch_idx // batch_size) + 1
         
-        include = judge_repo_for_user(conn, user, repo, author_username, item_type)
+        print(f"[rank] === Batch {batch_num}/{total_batches} ({len(batch)} candidates) ===")
         
-        # Commit immediately so GET can see this judgment (incremental availability)
+        # Process batch in parallel
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            # Submit all candidates in this batch
+            future_to_candidate = {
+                executor.submit(_judge_candidate_parallel, user, viewer_username, cand, now): cand
+                for cand in batch
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_candidate):
+                candidate = future_to_candidate[future]
+                item_id = candidate[1]  # Extract item_id for logging
+                
+                try:
+                    result = future.result()
+                    if result:
+                        adjusted_ts, feed_item, item_type, item_id_result = result
+                        ranked.append((adjusted_ts, feed_item))
+                        included_count += 1
+                    else:
+                        excluded_count += 1
+                except Exception as exc:
+                    print(f"[rank] ERROR judging {item_id}: {exc}")
+                    excluded_count += 1
+        
+        # Commit after each batch (incremental availability)
         conn.commit()
-        
-        if not include:
-            print(f"[rank]   -> Judgment: EXCLUDE (skipped)")
-            excluded_count += 1
-            continue
-        
-        print(f"[rank]   -> Judgment: INCLUDE")
-        included_count += 1
-        
-        rec = get_recommendation(conn, viewer_username, item_type, item_id)
-        adjusted_ts, feed_item = _apply_fatigue_and_create_item(
-            repo, author_username, github_ts, rec, now
-        )
-        
-        times_shown = rec.times_shown if rec else 0
-        hours_since = (now - float(rec.last_shown_at)) / 3600.0 if rec and rec.last_shown_at else 1e9
-        penalty_h = _fatigue_penalty_hours(times_shown, hours_since)
-        
-        print(f"[rank]   -> Exposure: shown={times_shown}x, last={hours_since:.1f}h ago, penalty={penalty_h:.1f}h")
-        print(f"[rank]   -> Score: {adjusted_ts:.2f} (raw: {github_ts:.2f})")
-        
-        ranked.append((adjusted_ts, feed_item))
+        print(f"[rank] Batch {batch_num} complete, committed {len(batch)} judgments")
     
     items = _finalize_ranked_feed(ranked, limit, viewer_username, conn, now)
     

@@ -175,7 +175,8 @@ def build_for_you_community_asset(config: UserConfig) -> None:
         config.username,
         source="community",
         sample_n=200,
-        limit=30
+        limit=30,
+        batch_size=15
     )
 
 
@@ -191,5 +192,6 @@ def build_for_you_trending_asset(config: UserConfig) -> None:
         config.username,
         source="trending",
         sample_n=200,
-        limit=30
+        limit=30,
+        batch_size=15
     )
