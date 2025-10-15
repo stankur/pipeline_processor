@@ -411,6 +411,21 @@ def delete_user_repo_links(conn: Connection, username: str) -> None:
     print(f"[db] delete_user_repo_links ok user={username}")
 
 
+def delete_user_recommendations(conn: Connection, username: str) -> None:
+    """Delete all cached recommendations for a user.
+    
+    Useful for clearing feed cache when prompt logic changes or for testing fresh state.
+    Does NOT affect work_items or repo subjects - only clears recommendation judgments.
+    """
+    print(f"[db] delete_user_recommendations user={username}")
+    result = conn.execute(
+        "DELETE FROM recommendations WHERE user_id=%s",
+        (username,),
+    )
+    count = result.rowcount
+    print(f"[db] delete_user_recommendations ok user={username} deleted={count}")
+
+
 def delete_user_completely(conn: Connection, username: str) -> None:
     """Delete a user and all their associated resources.
     

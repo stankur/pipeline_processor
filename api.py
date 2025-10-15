@@ -11,11 +11,13 @@ from db import (
     init_db,
     get_subject,
     get_user_repos,
+    get_work_item,
     list_user_work_items,
     reset_user_work_items_to_pending,
     reset_user_repo_work_items_to_pending,
     delete_user_repo_subjects,
     delete_user_completely,
+    delete_user_recommendations,
     upsert_subject,
     upsert_user_repo_link,
     get_user_subject,
@@ -243,6 +245,28 @@ def restart(username: str):
     return jsonify({"ok": True, "queued": True, "forced": True})
 
 
+@app.post("/users/<username>/clear-recommendations")
+def clear_recommendations(username: str):
+    """Clear all cached recommendations for a user.
+    
+    Deletes all feed recommendation judgments, forcing fresh LLM evaluation on next build.
+    Useful when prompt logic changes or for testing from clean state.
+    Does NOT affect user profile, repos, or work items.
+    """
+    print(f"[api] clear_recommendations called username={username}")
+    conn = get_conn()
+    
+    user = get_user_subject(conn, username)
+    if not user:
+        return jsonify({"ok": False, "error": "user_not_found"}), 404
+    
+    delete_user_recommendations(conn, username)
+    conn.commit()
+    
+    print(f"[api] clear_recommendations completed username={username}")
+    return jsonify({"ok": True, "cleared": True})
+
+
 @app.delete("/users/<username>")
 def delete_user(username: str):
     """Delete a user and all their associated resources.
@@ -325,10 +349,14 @@ def restart_from(username: str):
 
 @app.get("/users/<username>/data")
 def data(username: str):
-    """Get user and repo data."""
+    """Get user and repo data.
+    
+    Returns:
+        - user: user profile data or null
+        - repos: list of repos if fetch_repos succeeded, null if not yet fetched
+    """
     conn = get_conn()
     u = get_subject(conn, "user", username)
-    repos = get_user_repos(conn, username)
     
     user_data = None
     if u and u["data_json"]:
@@ -338,14 +366,22 @@ def data(username: str):
         except Exception:
             user_data = None
     
-    repos_data = []
-    for r in repos:
-        if r["data_json"]:
-            try:
-                repo_model = RepoSubject.model_validate_json(r["data_json"])
-                repos_data.append(repo_model.model_dump())
-            except Exception:
-                continue
+    # Check if fetch_repos task has completed
+    fetch_repos_work = get_work_item(conn, "fetch_repos", "user", username)
+    repos_fetched = fetch_repos_work and fetch_repos_work["status"] == "succeeded"
+    
+    repos_data = None
+    if repos_fetched:
+        # Repos have been fetched - include the list (even if empty)
+        repos = get_user_repos(conn, username)
+        repos_data = []
+        for r in repos:
+            if r["data_json"]:
+                try:
+                    repo_model = RepoSubject.model_validate_json(r["data_json"])
+                    repos_data.append(repo_model.model_dump())
+                except Exception:
+                    continue
     
     return jsonify({"user": user_data, "repos": repos_data})
 

@@ -74,6 +74,9 @@ start user="stankur":
 restart user="stankur":
     @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/restart || curl -X POST http://localhost:8080/users/{{user}}/restart
 
+clear-recommendations user="stankur":
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}}/clear-recommendations || curl -X POST http://localhost:8080/users/{{user}}/clear-recommendations
+
 delete user="stankur":
     @[ -n "$API_KEY" ] && curl -X DELETE -H "Authorization: Bearer $API_KEY" http://localhost:8080/users/{{user}} || curl -X DELETE http://localhost:8080/users/{{user}}
 
