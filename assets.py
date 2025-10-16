@@ -8,7 +8,12 @@ from typing import List, Optional
 
 from dagster import asset, Config
 
-from db import get_conn, get_work_item, get_user_repos
+from db import (
+    get_conn,
+    get_work_item,
+    get_user_repos,
+    get_repos_with_successful_work_item,
+)
 from tasks import (
     fetch_profile,
     fetch_repos,
@@ -16,6 +21,8 @@ from tasks import (
     infer_user_theme,
     enhance_repo_media,
     generate_repo_blurb,
+    embed_repos_batch,
+    embed_user_profile,
     extract_repo_emphasis,
     extract_repo_keywords,
     extract_repo_kind,
@@ -100,24 +107,41 @@ def generate_repo_blurb_asset(config: UserConfig) -> None:
             generate_repo_blurb(repo_id)
 
 
+@asset(deps=[generate_repo_blurb_asset], metadata={"work_item_kinds": ["embed_repo"], "scope": "repo"})
+def embed_repo_asset(config: UserConfig) -> None:
+    """Embed repos with successful blurbs in batches of 20 for efficiency.
+    
+    Uses batch API to embed multiple repos simultaneously.
+    Automatically re-embeds if content changes (hash-based).
+    """
+    username = config.username
+    conn = get_conn()
+    
+    # Query repos with successful generate_repo_blurb
+    repo_ids = get_repos_with_successful_work_item(conn, username, "generate_repo_blurb")
+    
+    # Call batch embedding task
+    embed_repos_batch(username, repo_ids)
+
+
+@asset(deps=[embed_repo_asset], metadata={"work_item_kinds": ["embed_user_profile"], "scope": "user"})
+def embed_user_profile_asset(config: UserConfig) -> None:
+    """Embed user profile after highlighted repos are embedded.
+    
+    Combines user bio with highlighted repo descriptions into single embedding.
+    Stored in subjects.embedding WHERE subject_type='user'.
+    """
+    username = config.username
+    embed_user_profile(username)
+
+
 @asset(deps=[generate_repo_blurb_asset], metadata={"work_item_kinds": ["extract_repo_emphasis"], "scope": "repo"})
 def extract_repo_emphasis_asset(config: UserConfig) -> None:
     """Extract emphasis only for repos that successfully generated blurbs."""
     username = config.username
     conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT w.subject_id
-        FROM work_items w
-        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
-        WHERE w.kind = 'generate_repo_blurb'
-          AND w.subject_type = 'repo'
-          AND w.status = 'succeeded'
-        """,
-        (username,),
-    ).fetchall()
-    for row in rows:
-        repo_id = row["subject_id"]
+    repo_ids = get_repos_with_successful_work_item(conn, username, "generate_repo_blurb")
+    for repo_id in repo_ids:
         extract_repo_emphasis(repo_id)
 
 
@@ -126,19 +150,8 @@ def extract_repo_keywords_asset(config: UserConfig) -> None:
     """Extract keywords only for repos that successfully generated blurbs."""
     username = config.username
     conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT w.subject_id
-        FROM work_items w
-        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
-        WHERE w.kind = 'generate_repo_blurb'
-          AND w.subject_type = 'repo'
-          AND w.status = 'succeeded'
-        """,
-        (username,),
-    ).fetchall()
-    for row in rows:
-        repo_id = row["subject_id"]
+    repo_ids = get_repos_with_successful_work_item(conn, username, "generate_repo_blurb")
+    for repo_id in repo_ids:
         extract_repo_keywords(repo_id)
 
 
@@ -147,19 +160,8 @@ def extract_repo_kind_asset(config: UserConfig) -> None:
     """Extract a compact kind phrase only for repos that successfully generated blurbs."""
     username = config.username
     conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT w.subject_id
-        FROM work_items w
-        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
-        WHERE w.kind = 'generate_repo_blurb'
-          AND w.subject_type = 'repo'
-          AND w.status = 'succeeded'
-        """,
-        (username,),
-    ).fetchall()
-    for row in rows:
-        repo_id = row["subject_id"]
+    repo_ids = get_repos_with_successful_work_item(conn, username, "generate_repo_blurb")
+    for repo_id in repo_ids:
         extract_repo_kind(repo_id)
 
 

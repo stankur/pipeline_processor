@@ -218,6 +218,7 @@ def restart(username: str):
             "fetch_repos",
             "select_highlighted_repos",
             "infer_user_theme",
+            "embed_user_profile",
         ],
     )
 
@@ -228,6 +229,7 @@ def restart(username: str):
         [
             "enhance_repo_media",
             "generate_repo_blurb",
+            "embed_repo",
             "extract_repo_emphasis",
             "extract_repo_keywords",
                 "extract_repo_kind",
@@ -252,13 +254,11 @@ def clear_recommendations(username: str):
     Deletes all feed recommendation judgments, forcing fresh LLM evaluation on next build.
     Useful when prompt logic changes or for testing from clean state.
     Does NOT affect user profile, repos, or work items.
+    
+    Works even if user doesn't exist in subjects table (clears orphaned data).
     """
     print(f"[api] clear_recommendations called username={username}")
     conn = get_conn()
-    
-    user = get_user_subject(conn, username)
-    if not user:
-        return jsonify({"ok": False, "error": "user_not_found"}), 404
     
     delete_user_recommendations(conn, username)
     conn.commit()
@@ -272,14 +272,10 @@ def delete_user(username: str):
     """Delete a user and all their associated resources.
     
     Removes user subject, work items, repo links, and owned repos.
+    Works even if user doesn't exist (cleans up any orphaned data).
     """
     print(f"[api] delete_user called username={username}")
     conn = get_conn()
-    
-    # Check if user exists
-    user = get_user_subject(conn, username)
-    if not user:
-        return jsonify({"ok": False, "error": "user_not_found"}), 404
     
     delete_user_completely(conn, username)
     conn.commit()

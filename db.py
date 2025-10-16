@@ -48,6 +48,36 @@ def migrate_db() -> None:
         conn.execute("ALTER TABLE recommendations DROP COLUMN prompt_hash")
         conn.commit()
     
+    # Migration 3: Enable pgvector extension
+    try:
+        print("[db] Enabling pgvector extension...")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        conn.commit()
+        print("[db] pgvector extension enabled")
+    except Error as e:
+        print(f"[db] pgvector extension warning: {e}")
+        # Non-fatal if already exists
+    
+    # Migration 4: Add embedding column to subjects (4096 dims for Qwen3-Embedding-8B)
+    result = conn.execute("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='subjects' AND column_name='embedding'
+    """).fetchone()
+    
+    if not result:
+        print("[db] Adding embedding column to subjects...")
+        conn.execute("ALTER TABLE subjects ADD COLUMN embedding vector(4096)")
+        conn.commit()
+        print("[db] Added embedding column")
+    
+    # Migration 5: Vector similarity index
+    # SKIPPED: pgvector indexes (both HNSW and IVFFlat) have 2000 dimension limit
+    # Our embeddings are 4096 dimensions, so we'll use sequential scan
+    # Performance: ~10-50ms for 1000 repos, which is fine for async feed building
+    # Can revisit if scaling to 100k+ repos or need real-time queries
+    print("[db] Vector index skipped (using sequential scan for 4096-dim embeddings)")
+    
     print("[db] Migrations complete")
 
 
@@ -752,6 +782,81 @@ def get_cached_recommendations_by_type(conn: Connection, user_id: str, item_type
             continue
     
     return recommendations
+
+
+def get_repos_with_successful_work_item(
+    conn: Connection, username: str, work_item_kind: str
+) -> list[str]:
+    """Get repo IDs for user's repos that have a successful work item of given kind.
+    
+    Args:
+        conn: Database connection
+        username: Username to filter by
+        work_item_kind: Work item kind to check (e.g., 'generate_repo_blurb')
+        
+    Returns:
+        List of repo_id strings
+    """
+    rows = conn.execute(
+        """
+        SELECT w.subject_id
+        FROM work_items w
+        JOIN user_repo_links l ON l.repo_id = w.subject_id AND l.username = %s
+        WHERE w.kind = %s
+          AND w.subject_type = 'repo'
+          AND w.status = 'succeeded'
+        """,
+        (username, work_item_kind),
+    ).fetchall()
+    return [row["subject_id"] for row in rows]
+
+
+def update_repo_embedding(conn: Connection, repo_id: str, embedding: list[float]) -> None:
+    """Store embedding vector for a repo.
+    
+    Args:
+        conn: Database connection
+        repo_id: Repository full name "owner/repo"
+        embedding: Embedding vector (list of floats)
+        
+    Raises:
+        Error: If update fails
+    """
+    try:
+        # Convert embedding list to postgres vector format
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        conn.execute(
+            "UPDATE subjects SET embedding = %s WHERE subject_type='repo' AND subject_id=%s",
+            (embedding_str, repo_id),
+        )
+        print(f"[db] update_repo_embedding ok repo={repo_id} dim={len(embedding)}")
+    except Error as e:
+        print(f"[db] update_repo_embedding error repo={repo_id} err={e}")
+        raise
+
+
+def update_user_embedding(conn: Connection, username: str, embedding: list[float]) -> None:
+    """Store embedding vector for a user profile.
+    
+    Args:
+        conn: Database connection
+        username: GitHub username
+        embedding: Embedding vector (list of floats)
+        
+    Raises:
+        Error: If update fails
+    """
+    try:
+        # Convert embedding list to postgres vector format
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        conn.execute(
+            "UPDATE subjects SET embedding = %s WHERE subject_type='user' AND subject_id=%s",
+            (embedding_str, username),
+        )
+        print(f"[db] update_user_embedding ok user={username} dim={len(embedding)}")
+    except Error as e:
+        print(f"[db] update_user_embedding error user={username} err={e}")
+        raise
 
 
 def get_all_highlighted_repos_with_gallery(conn: Connection) -> list[dict]:

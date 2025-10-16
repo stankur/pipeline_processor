@@ -22,6 +22,15 @@ from db import (
     upsert_repo_subject,
     get_user_subject,
     get_repo_subject,
+    update_repo_embedding,
+    update_user_embedding,
+)
+from embeddings import (
+    format_repo_for_embedding,
+    format_user_for_embedding,
+    compute_embedding_hash,
+    get_embedding,
+    get_embeddings_batch,
 )
 from github_client import GitHubClient
 from utils import parse_llm_json
@@ -947,6 +956,240 @@ def generate_repo_blurb(repo_id: str) -> None:
     set_work_status(conn, "generate_repo_blurb", "repo", repo_id, "succeeded", output.model_dump_json())
     conn.commit()
     print(f"[task] generate_repo_blurb done repo={repo_id} has_desc={bool(desc)}")
+
+
+def embed_repos_batch(username: str, repo_ids: list[str]) -> None:
+    """Batch embed multiple repos for efficiency.
+    
+    Embeds repos after blurb generation using format: name + description + generated_description + language.
+    Processes repos in batches of 20 to minimize API calls.
+    Stores embeddings in subjects.embedding and tracks content hash for change detection.
+    
+    Automatically re-embeds if content changes (hash mismatch).
+    """
+    print(f"[task] embed_repos_batch start username={username} repo_count={len(repo_ids)}")
+    conn = get_conn()
+    
+    if not repo_ids:
+        print(f"[task] embed_repos_batch: no repos to embed for username={username}")
+        return
+    
+    # Collect repos that need embedding
+    repos_to_embed = []
+    for repo_id in repo_ids:
+        repo = get_repo_subject(conn, repo_id)
+        
+        if not repo:
+            continue
+        
+        # Format content and compute hash
+        embedding_content = format_repo_for_embedding(repo)
+        content_hash = compute_embedding_hash(embedding_content)
+        
+        # Check if already embedded with same content
+        work_item = get_work_item(conn, "embed_repo", "repo", repo_id)
+        if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
+            try:
+                output_data = json.loads(work_item["output_json"])
+                stored_hash = output_data.get("content_hash")
+                if stored_hash == content_hash:
+                    print(f"[task] embed_repos_batch: cache hit {repo_id}")
+                    continue
+                else:
+                    print(f"[task] embed_repos_batch: content changed {repo_id}, re-embedding")
+            except Exception:
+                pass
+        
+        repos_to_embed.append((repo_id, repo, embedding_content, content_hash))
+    
+    if not repos_to_embed:
+        print(f"[task] embed_repos_batch: all repos already embedded for username={username}")
+        return
+    
+    print(f"[task] embed_repos_batch: embedding {len(repos_to_embed)} repos for username={username}")
+    
+    # Process in batches of 20
+    BATCH_SIZE = 20
+    for i in range(0, len(repos_to_embed), BATCH_SIZE):
+        batch = repos_to_embed[i:i+BATCH_SIZE]
+        batch_ids = [item[0] for item in batch]
+        
+        print(f"[task] embed_repos_batch: batch {i//BATCH_SIZE + 1} ({len(batch)} repos): {batch_ids}")
+        
+        # Mark all as running
+        for repo_id, _, _, _ in batch:
+            set_work_status(conn, "embed_repo", "repo", repo_id, "running")
+        conn.commit()
+        
+        # Call batch embedding API
+        try:
+            texts = [item[2] for item in batch]  # embedding_content
+            embeddings = get_embeddings_batch(texts)
+            print(f"[task] embed_repos_batch: received {len(embeddings)} embeddings")
+        except Exception as e:
+            print(f"[task] embed_repos_batch: batch API call failed: {e}")
+            # Mark all as failed
+            for repo_id, _, _, _ in batch:
+                set_work_status(
+                    conn,
+                    "embed_repo",
+                    "repo",
+                    repo_id,
+                    "failed",
+                    json.dumps({"reason": f"batch_api_error: {e}"}),
+                )
+            conn.commit()
+            continue
+        
+        # Store embeddings for each repo
+        for (repo_id, repo, content, content_hash), embedding in zip(batch, embeddings):
+            try:
+                # Store embedding in database
+                update_repo_embedding(conn, repo_id, embedding)
+                
+                # Mark success with content hash
+                output_json = json.dumps({"content_hash": content_hash, "embedding_dim": len(embedding)})
+                set_work_status(conn, "embed_repo", "repo", repo_id, "succeeded", output_json)
+                print(f"[task] embed_repos_batch: stored embedding for {repo_id}")
+            except Exception as e:
+                print(f"[task] embed_repos_batch: failed to store embedding for {repo_id}: {e}")
+                set_work_status(
+                    conn,
+                    "embed_repo",
+                    "repo",
+                    repo_id,
+                    "failed",
+                    json.dumps({"reason": f"storage_error: {e}"}),
+                )
+        
+        conn.commit()
+    
+    print(f"[task] embed_repos_batch: completed for username={username}")
+
+
+def embed_user_profile(username: str) -> None:
+    """Generate and store embedding for user profile.
+    
+    Embeds user after highlighted repos are selected and blurbed.
+    Format: bio + concatenated highlighted repo descriptions
+    Stores embedding in subjects.embedding WHERE subject_type='user'
+    
+    Automatically re-embeds if content changes (hash mismatch).
+    """
+    print(f"[task] embed_user_profile start username={username}")
+    conn = get_conn()
+    
+    # Load user subject
+    user = get_user_subject(conn, username)
+    if not user:
+        set_work_status(
+            conn,
+            "embed_user_profile",
+            "user",
+            username,
+            "failed",
+            json.dumps({"reason": "no_subject"}),
+        )
+        conn.commit()
+        print(f"[task] embed_user_profile FAILED username={username} reason=no_subject")
+        return
+    
+    # Get highlighted repo names from select_highlighted_repos work item
+    highlighted_names = []
+    work_item = get_work_item(conn, "select_highlighted_repos", "user", username)
+    if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
+        try:
+            data = json.loads(work_item["output_json"])
+            highlighted_names = data.get("repos", [])
+        except Exception:
+            pass
+    
+    if not highlighted_names:
+        print(f"[task] embed_user_profile: no highlighted repos for username={username}, embedding user only")
+    
+    # Load full repo subjects for highlighted repos
+    highlighted_repos = []
+    repo_rows = get_user_repos(conn, username)
+    repo_by_name = {}
+    for repo_row in repo_rows:
+        try:
+            repo_data = json.loads(repo_row["data_json"]) if repo_row["data_json"] else None
+            if repo_data and repo_data.get("name"):
+                repo_by_name[repo_data["name"]] = repo_row
+        except Exception:
+            continue
+    
+    for repo_name in highlighted_names:
+        if repo_name in repo_by_name:
+            repo_row = repo_by_name[repo_name]
+            try:
+                repo = RepoSubject.model_validate_json(repo_row["data_json"])
+                highlighted_repos.append(repo)
+            except Exception as e:
+                print(f"[task] embed_user_profile: failed to parse repo {repo_name}: {e}")
+                continue
+    
+    # Format content for embedding
+    embedding_content = format_user_for_embedding(user, highlighted_repos)
+    content_hash = compute_embedding_hash(embedding_content)
+    
+    # Check if already embedded with same content
+    work_item = get_work_item(conn, "embed_user_profile", "user", username)
+    if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
+        try:
+            output_data = json.loads(work_item["output_json"])
+            stored_hash = output_data.get("content_hash")
+            if stored_hash == content_hash:
+                print(f"[task] embed_user_profile cache hit username={username} (content unchanged)")
+                return
+            else:
+                print(f"[task] embed_user_profile content changed username={username}, re-embedding")
+        except Exception:
+            pass
+    
+    # Mark as running
+    set_work_status(conn, "embed_user_profile", "user", username, "running")
+    
+    # Generate embedding
+    try:
+        print(f"[task] embed_user_profile calling embedding API username={username}")
+        embedding = get_embedding(embedding_content)
+        print(f"[task] embed_user_profile received embedding dim={len(embedding)} username={username}")
+    except Exception as e:
+        set_work_status(
+            conn,
+            "embed_user_profile",
+            "user",
+            username,
+            "failed",
+            json.dumps({"reason": str(e)}),
+        )
+        conn.commit()
+        print(f"[task] embed_user_profile FAILED username={username} error={e}")
+        return
+    
+    # Store embedding in subjects table
+    try:
+        update_user_embedding(conn, username, embedding)
+        print(f"[task] embed_user_profile stored embedding username={username}")
+    except Exception as e:
+        set_work_status(
+            conn,
+            "embed_user_profile",
+            "user",
+            username,
+            "failed",
+            json.dumps({"reason": f"storage_error: {e}"}),
+        )
+        conn.commit()
+        print(f"[task] embed_user_profile FAILED to store embedding username={username} error={e}")
+        return
+    
+    # Mark success with content hash
+    output_json = json.dumps({"content_hash": content_hash, "embedding_dim": len(embedding)})
+    set_work_status(conn, "embed_user_profile", "user", username, "succeeded", output_json)
+    conn.commit()
+    print(f"[task] embed_user_profile done username={username}")
 
 
 # -------------------- New task: extract emphasis from generated_description --------------------
