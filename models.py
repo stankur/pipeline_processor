@@ -61,9 +61,11 @@ class RepoSubject(BaseModel):
     pushed_at: Optional[str] = None
     updated_at: Optional[str] = None
     topics: list[str] = Field(default_factory=list)
-    
+
     # Metadata fields
-    extracted_at: Optional[str] = None  # ISO timestamp of when we scraped/fetched this data
+    extracted_at: Optional[
+        str
+    ] = None  # ISO timestamp of when we scraped/fetched this data
 
     # Enhanced fields (added by tasks)
     link: Optional[str] = None  # from enhance_repo_media
@@ -76,7 +78,7 @@ class RepoSubject(BaseModel):
 
 class ForYouRepoItem(RepoSubject):
     """Repository item in the for-you feed, includes repo data plus metadata."""
-    
+
     username: str  # The user this repo is associated with
     is_ghost: bool = False  # Whether the associated user is a ghost
 
@@ -151,9 +153,17 @@ class Recommendation(BaseModel):
     user_id: str
     item_type: ItemType
     item_id: str
-    include: Optional[bool] = None
-    judged_at: Optional[float] = None  # epoch seconds
     times_shown: int = 0
     last_shown_at: Optional[float] = None  # epoch seconds
-    judgment_fingerprint: Optional[str] = None  # Hash of user prompt + model config
 
+
+class WorkItem(BaseModel):
+    """Work item row from work_items table."""
+
+    id: str
+    kind: str
+    subject_type: str
+    subject_id: str
+    status: str  # "pending" | "running" | "succeeded" | "failed"
+    output_json: Optional[str] = None
+    processed_at: Optional[float] = None

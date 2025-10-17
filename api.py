@@ -27,14 +27,16 @@ from db import (
 )
 from defs import all_assets, asset_meta, defs as dag_defs
 from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
-from feed.rank import build_feed_for_user, get_feed_from_cache
+from feed.rank import build_feed_for_user
 from gallery import get_gallery_repos
 
 
 app = Flask(__name__)
 
 # CORS: allow only configured origins (comma-separated). Example local: http://localhost:3000
-_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_origins = [
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
 if _origins:
     CORS(app, resources={r"/*": {"origins": _origins}})
 else:
@@ -62,7 +64,9 @@ def _build_run_config_for_username(username: str) -> dict:
 def _run_worker(username: str, selection: list[str] | None = None):
     """Run the Dagster worker for a specific username using SDK."""
     try:
-        print(f"[api] materializing assets for username={username} selection={selection}")
+        print(
+            f"[api] materializing assets for username={username} selection={selection}"
+        )
 
         run_config = _build_run_config_for_username(username)
 
@@ -73,7 +77,9 @@ def _run_worker(username: str, selection: list[str] | None = None):
             raise_on_error=False,  # Don't crash API on task failures
         )
 
-        print(f"[api] materialization completed for username={username} success={result.success}")
+        print(
+            f"[api] materialization completed for username={username} success={result.success}"
+        )
         return result.success
 
     except Exception as e:
@@ -108,68 +114,79 @@ def _require_api_key():
 @app.post("/users/<username>/login")
 def login(username: str):
     """Handle user login and determine if pipeline needs to run.
-    
+
     Returns status: "new" | "activated" | "existing"
     """
     print(f"[api] login called username={username}")
     conn = get_conn()
-    
+
     user = get_user_subject(conn, username)
-    
+
     if not user:
         print(f"[api] login: new user username={username}")
         _run_worker_async(username)
-        return jsonify({
-            "ok": True,
-            "status": "new",
-            "processing": True,
-            "data_ready": False,
-        })
-    
+        return jsonify(
+            {
+                "ok": True,
+                "status": "new",
+                "processing": True,
+                "data_ready": False,
+            }
+        )
+
     if user.is_ghost:
         print(f"[api] login: activating ghost username={username}")
         user.is_ghost = False
         upsert_user_subject(conn, username, user)
         conn.commit()
         _run_worker_async(username)
-        return jsonify({
-            "ok": True,
-            "status": "activated",
-            "processing": False,
-            "data_ready": True,
-        })
-    
+        return jsonify(
+            {
+                "ok": True,
+                "status": "activated",
+                "processing": False,
+                "data_ready": True,
+            }
+        )
+
     print(f"[api] login: existing user username={username}")
     _run_worker_async(username)
-    return jsonify({
-        "ok": True,
-        "status": "existing",
-        "processing": False,
-        "data_ready": True,
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "status": "existing",
+            "processing": False,
+            "data_ready": True,
+        }
+    )
 
 
 @app.post("/ghost-users/<username>")
 def create_ghost_user(username: str):
     """Create an inactive user account with their data pre-fetched.
-    
+
     Query params:
       - force: If true, recreate even if user exists
     """
     print(f"[api] create_ghost_user called username={username}")
     force = request.args.get("force", "").lower() in ("true", "1", "yes")
-    
+
     conn = get_conn()
     existing = get_user_subject(conn, username)
-    
+
     if existing and not force:
-        return jsonify({
-            "ok": False,
-            "error": "user_exists",
-            "message": "User already exists. Use ?force=true to recreate.",
-            "is_ghost": existing.is_ghost,
-        }), 400
-    
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "user_exists",
+                    "message": "User already exists. Use ?force=true to recreate.",
+                    "is_ghost": existing.is_ghost,
+                }
+            ),
+            400,
+        )
+
     if existing and force:
         print(f"[api] create_ghost_user: forcing recreation username={username}")
         existing.is_ghost = True
@@ -180,15 +197,17 @@ def create_ghost_user(username: str):
         ghost = UserSubject(login=username, is_ghost=True)
         upsert_user_subject(conn, username, ghost)
         conn.commit()
-    
+
     _run_worker_async(username)
-    
-    return jsonify({
-        "ok": True,
-        "created": True,
-        "is_ghost": True,
-        "processing": True,
-    })
+
+    return jsonify(
+        {
+            "ok": True,
+            "created": True,
+            "is_ghost": True,
+            "processing": True,
+        }
+    )
 
 
 @app.post("/users/<username>/start")
@@ -232,7 +251,7 @@ def restart(username: str):
             "embed_repo",
             "extract_repo_emphasis",
             "extract_repo_keywords",
-                "extract_repo_kind",
+            "extract_repo_kind",
         ],
     )
 
@@ -250,19 +269,19 @@ def restart(username: str):
 @app.post("/users/<username>/clear-recommendations")
 def clear_recommendations(username: str):
     """Clear all cached recommendations for a user.
-    
+
     Deletes all feed recommendation judgments, forcing fresh LLM evaluation on next build.
     Useful when prompt logic changes or for testing from clean state.
     Does NOT affect user profile, repos, or work items.
-    
+
     Works even if user doesn't exist in subjects table (clears orphaned data).
     """
     print(f"[api] clear_recommendations called username={username}")
     conn = get_conn()
-    
+
     delete_user_recommendations(conn, username)
     conn.commit()
-    
+
     print(f"[api] clear_recommendations completed username={username}")
     return jsonify({"ok": True, "cleared": True})
 
@@ -270,16 +289,16 @@ def clear_recommendations(username: str):
 @app.delete("/users/<username>")
 def delete_user(username: str):
     """Delete a user and all their associated resources.
-    
+
     Removes user subject, work items, repo links, and owned repos.
     Works even if user doesn't exist (cleans up any orphaned data).
     """
     print(f"[api] delete_user called username={username}")
     conn = get_conn()
-    
+
     delete_user_completely(conn, username)
     conn.commit()
-    
+
     print(f"[api] delete_user completed username={username}")
     return jsonify({"ok": True, "deleted": True})
 
@@ -346,14 +365,14 @@ def restart_from(username: str):
 @app.get("/users/<username>/data")
 def data(username: str):
     """Get user and repo data.
-    
+
     Returns:
         - user: user profile data or null
         - repos: list of repos if fetch_repos succeeded, null if not yet fetched
     """
     conn = get_conn()
     u = get_subject(conn, "user", username)
-    
+
     user_data = None
     if u and u["data_json"]:
         try:
@@ -361,11 +380,11 @@ def data(username: str):
             user_data = user_model.model_dump()
         except Exception:
             user_data = None
-    
+
     # Check if fetch_repos task has completed
     fetch_repos_work = get_work_item(conn, "fetch_repos", "user", username)
-    repos_fetched = fetch_repos_work and fetch_repos_work["status"] == "succeeded"
-    
+    repos_fetched = fetch_repos_work and fetch_repos_work.status == "succeeded"
+
     repos_data = None
     if repos_fetched:
         # Repos have been fetched - include the list (even if empty)
@@ -378,7 +397,7 @@ def data(username: str):
                     repos_data.append(repo_model.model_dump())
                 except Exception:
                     continue
-    
+
     return jsonify({"user": user_data, "repos": repos_data})
 
 
@@ -394,7 +413,9 @@ def progress(username: str):
                     "kind": it["kind"],
                     "status": it["status"],
                     "processed_at": it["processed_at"],
-                    "output_json": json.loads(it["output_json"]) if it["output_json"] else None,
+                    "output_json": json.loads(it["output_json"])
+                    if it["output_json"]
+                    else None,
                 }
                 for it in items
             ]
@@ -405,10 +426,10 @@ def progress(username: str):
 @app.get("/for-you/<viewer_username>")
 def for_you(viewer_username: str):
     """Community For You feed using embedding similarity.
-    
+
     Query params:
       - limit: max items to return (default 30)
-    
+
     Returns personalized feed using embedding-based similarity ranking with fatigue penalty.
     Fast - no LLM calls, no cache needed.
     """
@@ -421,46 +442,48 @@ def for_you(viewer_username: str):
 @app.get("/for-you-trending/<viewer_username>")
 def for_you_trending(viewer_username: str):
     """Fast trending feed from cached recommendations.
-    
+
     Query params:
       - limit: max items to return (default 30)
-    
+
     Returns personalized trending feed using cached LLM judgments and fatigue ranking.
     Use POST to rebuild/populate cache.
     """
     conn = get_conn()
     limit = int((request.args.get("limit") or "30").strip() or "30")
-    items = get_feed_from_cache(conn, viewer_username, source="trending", limit=limit)
+    items = build_feed_for_user(conn, viewer_username, source="trending", limit=limit)
     return jsonify({"repos": [item.model_dump() for item in items]})
 
 
 @app.post("/for-you-trending/<viewer_username>")
 def build_for_you_trending(viewer_username: str):
     """Build trending feed by fetching/judging trending repos (slow, populates cache).
-    
+
     Query params:
       - limit: max items to evaluate (default 30)
-    
+
     Fetches trending repos from GitHub (if stale), filters by user's languages,
     runs LLM judgments to populate cache. Returns top ranked items.
     """
     conn = get_conn()
     limit = int((request.args.get("limit") or "30").strip() or "30")
     items = build_feed_for_user(conn, viewer_username, source="trending", limit=limit)
-    return jsonify({
-        "status": "completed",
-        "judged": len(items),
-        "repos": [item.model_dump() for item in items]
-    })
+    return jsonify(
+        {
+            "status": "completed",
+            "judged": len(items),
+            "repos": [item.model_dump() for item in items],
+        }
+    )
 
 
 @app.get("/gallery")
 def get_gallery():
     """Get global gallery of highlighted repos with images.
-    
+
     Query params:
       - limit: max items to return (default 30)
-    
+
     Returns highlighted repos with gallery images, sorted by recency.
     No per-user filtering - this is a global gallery visible to all.
     """
@@ -503,7 +526,11 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
         # Optional fields with defaults
         title = (img.get("title") or "").strip()
         caption = (img.get("caption") or "").strip()
-        is_highlight = bool(img.get("is_highlight")) if isinstance(img.get("is_highlight"), (bool, int)) else False
+        is_highlight = (
+            bool(img.get("is_highlight"))
+            if isinstance(img.get("is_highlight"), (bool, int))
+            else False
+        )
 
         # taken_at as epoch milliseconds (number). Accept numeric, or parse ISO/date-like string; default to now.
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -528,15 +555,17 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
         else:
             taken_at = now_ms
 
-        to_add.append({
-            "url": url,
-            "alt": (img.get("alt") or "").strip(),
-            "original_url": (img.get("original_url") or "").strip() or url,
-            "title": title,
-            "caption": caption,
-            "is_highlight": is_highlight,
-            "taken_at": taken_at,
-        })
+        to_add.append(
+            {
+                "url": url,
+                "alt": (img.get("alt") or "").strip(),
+                "original_url": (img.get("original_url") or "").strip() or url,
+                "title": title,
+                "caption": caption,
+                "is_highlight": is_highlight,
+                "taken_at": taken_at,
+            }
+        )
 
     if not to_add:
         return jsonify({"ok": False, "error": "no_images"}), 400
@@ -562,7 +591,9 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
     added = 0
     skipped = 0
     for item in to_add:
-        key_val = item.get(dedupe_key, "").strip() if isinstance(dedupe_key, str) else None
+        key_val = (
+            item.get(dedupe_key, "").strip() if isinstance(dedupe_key, str) else None
+        )
         if dedupe_key is not False and key_val in existing_keys:
             skipped += 1
             continue
@@ -588,13 +619,15 @@ def add_repo_gallery_images(username: str, owner: str, repo: str):
 
     conn.commit()
 
-    return jsonify({
-        "ok": True,
-        "repo_id": repo_id,
-        "added": added,
-        "skipped": skipped,
-        "gallery_count": len(repo.gallery),
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "repo_id": repo_id,
+            "added": added,
+            "skipped": skipped,
+            "gallery_count": len(repo.gallery),
+        }
+    )
 
 
 @app.delete("/users/<username>/repos/<owner>/<repo>/gallery")
@@ -605,7 +638,13 @@ def delete_repo_gallery_images(username: str, owner: str, repo: str):
     """
     repo_id = f"{owner}/{repo}"
 
-    urls = set([u.strip() for u in request.args.getlist("url") if isinstance(u, str) and u.strip()])
+    urls = set(
+        [
+            u.strip()
+            for u in request.args.getlist("url")
+            if isinstance(u, str) and u.strip()
+        ]
+    )
     if not urls:
         body = request.get_json(silent=True) or {}
         if isinstance(body.get("urls"), list):
@@ -618,7 +657,7 @@ def delete_repo_gallery_images(username: str, owner: str, repo: str):
 
     conn = get_conn()
     repo = get_repo_subject(conn, repo_id)
-    
+
     if not repo or not repo.gallery:
         # Nothing to remove
         return jsonify({"ok": True, "removed": 0, "gallery_count": 0})
@@ -638,21 +677,23 @@ def delete_repo_gallery_images(username: str, owner: str, repo: str):
 
     return jsonify({"ok": True, "removed": removed, "gallery_count": len(repo.gallery)})
 
+
 @app.get("/users/<username>/repos/<owner>/<repo>/gallery")
 def get_repo_gallery(username: str, owner: str, repo: str):
     """Get all images in a repository's gallery.
-    
+
     Returns the gallery as an array of image objects.
     """
     repo_id = f"{owner}/{repo}"
     conn = get_conn()
     repo_obj = get_repo_subject(conn, repo_id)
-    
+
     if not repo_obj:
         return jsonify({"gallery": []})
-    
+
     gallery = [img.model_dump() for img in repo_obj.gallery]
     return jsonify({"gallery": gallery})
+
 
 @app.patch("/users/<username>/repos/<owner>/<repo>/gallery")
 def update_repo_gallery_image(username: str, owner: str, repo: str):
@@ -707,7 +748,7 @@ def update_repo_gallery_image(username: str, owner: str, repo: str):
 
     conn = get_conn()
     repo_obj = get_repo_subject(conn, repo_id)
-    
+
     if not repo_obj or not repo_obj.gallery:
         return jsonify({"ok": True, "updated": 0})
 
@@ -729,6 +770,7 @@ def update_repo_gallery_image(username: str, owner: str, repo: str):
 
     return jsonify({"ok": True, "updated": updated})
 
+
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True})
@@ -737,5 +779,3 @@ def healthz():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(debug=True, host="0.0.0.0", port=port)
-
-

@@ -24,6 +24,8 @@ from db import (
     get_repo_subject,
     update_repo_embedding,
     update_user_embedding,
+    update_trending_repo_embedding,
+    get_subject_with_embedding,
 )
 from embeddings import (
     format_repo_for_embedding,
@@ -55,8 +57,7 @@ logger = getLogger(__name__)
 
 def _already_succeeded(conn, kind: str, subject_type: str, subject_id: str) -> bool:
     row = get_work_item(conn, kind, subject_type, subject_id)
-    return bool(row and row["status"] == "succeeded")
-
+    return bool(row and row.status == "succeeded")
 
 
 def _recent_enough(ts: str | None, years: int = 2) -> bool:
@@ -94,13 +95,17 @@ def _count_author_unique_commit_days(
         if not name:
             continue
         try:
-            commits = client.list_commits(owner, repo, author=author, sha=name, per_page=100, limit=100)
+            commits = client.list_commits(
+                owner, repo, author=author, sha=name, per_page=100, limit=100
+            )
         except Exception:
             commits = []
         for c in commits:
             try:
                 meta = c.get("commit", {})
-                date_str = meta.get("author", {}).get("date") or meta.get("committer", {}).get("date")
+                date_str = meta.get("author", {}).get("date") or meta.get(
+                    "committer", {}
+                ).get("date")
                 if date_str:
                     seen_days.add(date_str.split("T")[0])
                 if len(seen_days) >= short_circuit_at:
@@ -123,11 +128,11 @@ def fetch_profile(username: str) -> None:
     client = GitHubClient()
     profile = client.get_user(username)
     print(f"[task] fetch_profile got profile login={profile.get('login')}")
-    
+
     # Read existing user to preserve is_ghost flag
     existing = get_user_subject(conn, username)
     is_ghost = existing.is_ghost if existing else False
-    
+
     user = UserSubject(
         login=profile.get("login") or username,
         avatar_url=profile.get("avatar_url"),
@@ -138,9 +143,11 @@ def fetch_profile(username: str) -> None:
     )
     upsert_user_subject(conn, username, user)
     print(f"[task] fetch_profile upserted username={username}")
-    
+
     output = FetchProfileOutput(profile_found=True)
-    set_work_status(conn, "fetch_profile", "user", username, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn, "fetch_profile", "user", username, "succeeded", output.model_dump_json()
+    )
     conn.commit()
     print(f"[task] fetch_profile commit username={username}")
     print(f"[task] fetch_profile done username={username}")
@@ -202,7 +209,9 @@ def fetch_repos(username: str) -> None:
         if include_reason:
             kept_subjects.append(repo_subject.model_dump())
             upsert_repo_subject(conn, full_name, repo_subject)
-            upsert_user_repo_link(conn, username, full_name, include_reason, user_commit_days)
+            upsert_user_repo_link(
+                conn, username, full_name, include_reason, user_commit_days
+            )
 
     print(f"[task] fetch_repos kept owned+forks count={len(kept_subjects)}")
 
@@ -275,7 +284,7 @@ def fetch_repos(username: str) -> None:
         days = _count_author_unique_commit_days(client, owner, name, username)
         if days < ACTIVITY_DAYS_THRESHOLD:
             continue
-        
+
         repo_subject = RepoSubject(
             id=full_name,
             name=name,
@@ -293,7 +302,9 @@ def fetch_repos(username: str) -> None:
         seen_ids.add(full_name)
 
     output = FetchReposOutput(fetched=len(kept_subjects))
-    set_work_status(conn, "fetch_repos", "user", username, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn, "fetch_repos", "user", username, "succeeded", output.model_dump_json()
+    )
     conn.commit()
     print(f"[task] fetch_repos commit username={username}")
     print(f"[task] fetch_repos done username={username} kept={len(kept_subjects)}")
@@ -338,13 +349,19 @@ def _openrouter_chat(prompt: str, model: str = "deepseek/deepseek-chat-v3.1") ->
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
     }
-    resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=60)
+    resp = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=data,
+        timeout=60,
+    )
     resp.raise_for_status()
     j = resp.json()
     return (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
 
 
 # -------------------- New tasks: theme + highlights + enrichment --------------------
+
 
 def select_highlighted_repos(username: str) -> None:
     """Choose highlighted repository names from kept repos via LLM.
@@ -365,8 +382,12 @@ def select_highlighted_repos(username: str) -> None:
             obj = json.loads(r["data_json"]) if r["data_json"] else None
             if obj:
                 # Attach link metadata for downstream filtering
-                obj["_include_reason"] = r["include_reason"] if "include_reason" in r.keys() else None
-                obj["_user_commit_days"] = r["user_commit_days"] if "user_commit_days" in r.keys() else None
+                obj["_include_reason"] = (
+                    r["include_reason"] if "include_reason" in r.keys() else None
+                )
+                obj["_user_commit_days"] = (
+                    r["user_commit_days"] if "user_commit_days" in r.keys() else None
+                )
                 obj["_repo_id"] = r["subject_id"]
                 repos.append(obj)
         except Exception:
@@ -375,7 +396,9 @@ def select_highlighted_repos(username: str) -> None:
     # Log kept repos overview
     try:
         kept_names = [r.get("name", "") for r in repos]
-        print(f"[task] select_highlighted_repos kept_repos count={len(kept_names)} names={kept_names}")
+        print(
+            f"[task] select_highlighted_repos kept_repos count={len(kept_names)} names={kept_names}"
+        )
     except Exception:
         pass
 
@@ -416,7 +439,7 @@ def select_highlighted_repos(username: str) -> None:
         for repo in repos[:30]:
             lines.append(repo.get("name", ""))
             if repo.get("description"):
-                lines.append(repo["description"]) 
+                lines.append(repo["description"])
             lines.append(repo.get("language", ""))
             stars = repo.get("stargazers_count", 0)
             lines.append(str(stars or 0))
@@ -428,31 +451,45 @@ def select_highlighted_repos(username: str) -> None:
         full_prompt = f"{prompt_tmpl}\n\n{profile_blob}"
 
         # Log full prompt
-        print(f"[task] select_highlighted_repos PROMPT BEGIN\n{full_prompt}\nPROMPT END")
+        print(
+            f"[task] select_highlighted_repos PROMPT BEGIN\n{full_prompt}\nPROMPT END"
+        )
 
         if count_tokens(full_prompt) < 5000:
             print(f"[task] select_highlighted_repos token count OK, calling LLM")
             try:
                 text = _openrouter_chat(full_prompt)
-                print(f"[task] select_highlighted_repos LLM returned: {bool(text)} (length={len(text) if text else 0})")
+                print(
+                    f"[task] select_highlighted_repos LLM returned: {bool(text)} (length={len(text) if text else 0})"
+                )
                 if text:
                     # Log raw response
-                    print(f"[task] select_highlighted_repos RESPONSE BEGIN\n{text}\nRESPONSE END")
+                    print(
+                        f"[task] select_highlighted_repos RESPONSE BEGIN\n{text}\nRESPONSE END"
+                    )
                     data = parse_llm_json(text)
                     print(f"[task] select_highlighted_repos JSON parsed: {data}")
                     rr = data.get("repos") if isinstance(data, dict) else None
                     if isinstance(rr, list):
                         names = [str(x).strip() for x in rr if str(x).strip()]
-                        print(f"[task] select_highlighted_repos extracted repo names: {names}")
+                        print(
+                            f"[task] select_highlighted_repos extracted repo names: {names}"
+                        )
                     else:
-                        print(f"[task] select_highlighted_repos repos field is not a list: {rr}")
+                        print(
+                            f"[task] select_highlighted_repos repos field is not a list: {rr}"
+                        )
                 else:
-                    print(f"[task] select_highlighted_repos LLM returned empty response")
+                    print(
+                        f"[task] select_highlighted_repos LLM returned empty response"
+                    )
             except Exception as e:
                 print(f"[task] select_highlighted_repos ERROR: {e}")
                 names = []
         else:
-            print(f"[task] select_highlighted_repos token count too high: {count_tokens(full_prompt)} >= 5000")
+            print(
+                f"[task] select_highlighted_repos token count too high: {count_tokens(full_prompt)} >= 5000"
+            )
 
     # Persist highlights immediately onto the user subject for early availability
     try:
@@ -470,10 +507,16 @@ def select_highlighted_repos(username: str) -> None:
         pass
 
     out = {"repos": names}
-    print(f"[task] select_highlighted_repos parsed repos count={len(names)} names={names}")
-    set_work_status(conn, "select_highlighted_repos", "user", username, "succeeded", json.dumps(out))
+    print(
+        f"[task] select_highlighted_repos parsed repos count={len(names)} names={names}"
+    )
+    set_work_status(
+        conn, "select_highlighted_repos", "user", username, "succeeded", json.dumps(out)
+    )
     conn.commit()
-    print(f"[task] select_highlighted_repos done username={username} count={len(names)}")
+    print(
+        f"[task] select_highlighted_repos done username={username} count={len(names)}"
+    )
 
 
 def infer_user_theme(username: str) -> None:
@@ -502,7 +545,9 @@ def infer_user_theme(username: str) -> None:
         except Exception:
             highlights = []
 
-    print(f"[task] infer_user_theme highlights count={len(highlights)} names={highlights}")
+    print(
+        f"[task] infer_user_theme highlights count={len(highlights)} names={highlights}"
+    )
 
     # Load kept repos and filter to highlighted subset for prompt input
     kept_rows = get_user_repos(conn, username)
@@ -524,7 +569,7 @@ def infer_user_theme(username: str) -> None:
         for repo in subset[:30]:
             lines.append(repo.get("name", ""))
             if repo.get("description"):
-                lines.append(repo["description"]) 
+                lines.append(repo["description"])
             lines.append(repo.get("language", ""))
             stars = repo.get("stargazers_count", 0)
             lines.append(str(stars or 0))
@@ -539,9 +584,13 @@ def infer_user_theme(username: str) -> None:
             print(f"[task] infer_user_theme token count OK, calling LLM")
             try:
                 text = _openrouter_chat(full_prompt)
-                print(f"[task] infer_user_theme LLM returned: {bool(text)} (length={len(text) if text else 0})")
+                print(
+                    f"[task] infer_user_theme LLM returned: {bool(text)} (length={len(text) if text else 0})"
+                )
                 if text:
-                    print(f"[task] infer_user_theme RESPONSE BEGIN\n{text}\nRESPONSE END")
+                    print(
+                        f"[task] infer_user_theme RESPONSE BEGIN\n{text}\nRESPONSE END"
+                    )
                     data = json.loads(text)
                     print(f"[task] infer_user_theme JSON parsed: {data}")
                     if isinstance(data, dict) and isinstance(data.get("theme"), str):
@@ -555,58 +604,69 @@ def infer_user_theme(username: str) -> None:
                 print(f"[task] infer_user_theme ERROR: {e}")
                 theme = ""
         else:
-            print(f"[task] infer_user_theme token count too high: {count_tokens(full_prompt)} >= 5000")
+            print(
+                f"[task] infer_user_theme token count too high: {count_tokens(full_prompt)} >= 5000"
+            )
 
     # Persist into user subject
     user = get_user_subject(conn, username)
     if not user:
         user = UserSubject(login=username)
-    
+
     user.theme = theme
     user.highlighted_repos = highlights
     upsert_user_subject(conn, username, user)
 
     print(f"[task] infer_user_theme parsed theme_len={len(theme)} theme={theme}")
     output = InferUserThemeOutput(theme=theme)
-    set_work_status(conn, "infer_user_theme", "user", username, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn,
+        "infer_user_theme",
+        "user",
+        username,
+        "succeeded",
+        output.model_dump_json(),
+    )
     conn.commit()
-    print(f"[task] infer_user_theme done username={username} theme_len={len(theme)} highlights={len(highlights)}")
+    print(
+        f"[task] infer_user_theme done username={username} theme_len={len(theme)} highlights={len(highlights)}"
+    )
 
 
 def _capture_website_screenshot(url: str) -> Optional[bytes]:
     """Capture screenshot of website using ScreenshotOne API.
-    
+
     Args:
         url: Website URL to screenshot
-    
+
     Returns:
         Screenshot image bytes, or None if failed
     """
     try:
         import requests
-        
-        access_key = os.environ.get('SCREENSHOTONE_ACCESS_KEY', '').strip()
+
+        access_key = os.environ.get("SCREENSHOTONE_ACCESS_KEY", "").strip()
         if not access_key:
             print(f"[debug] SCREENSHOTONE_ACCESS_KEY not set, skipping screenshot")
             return None
-        
+
         # Build ScreenshotOne API request
         api_url = "https://api.screenshotone.com/take"
         params = {
-            'access_key': access_key,
-            'url': url,
-            'viewport_width': 1280,
-            'viewport_height': 720,
-            'device_scale_factor': 1,
-            'format': 'png',
-            'block_ads': True,
-            'block_cookie_banners': True,
-            'delay': 4,  # Wait 2 seconds for page to render
+            "access_key": access_key,
+            "url": url,
+            "viewport_width": 1280,
+            "viewport_height": 720,
+            "device_scale_factor": 1,
+            "format": "png",
+            "block_ads": True,
+            "block_cookie_banners": True,
+            "delay": 4,  # Wait 2 seconds for page to render
         }
-        
+
         response = requests.get(api_url, params=params, timeout=30)
         response.raise_for_status()
-        
+
         return response.content
     except Exception as e:
         print(f"[debug] Failed to screenshot {url}: {e}")
@@ -615,43 +675,43 @@ def _capture_website_screenshot(url: str) -> Optional[bytes]:
 
 def _upload_to_cloudinary(image_bytes: bytes, public_id: str) -> Optional[str]:
     """Upload image to Cloudinary and return URL.
-    
+
     Args:
         image_bytes: Image data
         public_id: Cloudinary public ID for the image
-    
+
     Returns:
         Cloudinary secure URL, or None if failed
     """
     try:
         import cloudinary
         import cloudinary.uploader
-        
+
         # Configure Cloudinary (idempotent)
         cloudinary.config(
-            cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-            api_key=os.environ.get('CLOUDINARY_API_KEY'),
-            api_secret=os.environ.get('CLOUDINARY_API_SECRET')
+            cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
+            api_key=os.environ.get("CLOUDINARY_API_KEY"),
+            api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
         )
-        
+
         result = cloudinary.uploader.upload(
-            image_bytes,
-            public_id=public_id,
-            folder="repo_screenshots"
+            image_bytes, public_id=public_id, folder="repo_screenshots"
         )
-        return result['secure_url']
+        return result["secure_url"]
     except Exception as e:
         print(f"[debug] Failed to upload to Cloudinary: {e}")
         return None
 
 
-def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List[Dict[str, Any]]]:
+def _extract_repo_media_data(
+    owner: str, name: str
+) -> tuple[Optional[str], List[Dict[str, Any]]]:
     """Extract demo images from repo README by checking actual dimensions.
-    
+
     Args:
         owner: Repository owner
         name: Repository name
-    
+
     Returns:
         (link, gallery_list) where:
         - link: Optional homepage URL from repo metadata
@@ -662,7 +722,7 @@ def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List
     from PIL import Image
     import requests
     from io import BytesIO
-    
+
     client = GitHubClient()
 
     # Fetch README content and repo metadata
@@ -696,118 +756,114 @@ def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List
 
     # Parse markdown to HTML
     html = mistune.html(readme_content)
-    
+
     # Use BeautifulSoup to extract all <img> tags
-    soup = BeautifulSoup(html, 'html.parser')
-    images = soup.find_all('img')
-    
+    soup = BeautifulSoup(html, "html.parser")
+    images = soup.find_all("img")
+
     # Extract and normalize URLs
     image_urls = []
     for img in images:
-        url = img.get('src', '').strip()
-        alt = img.get('alt', '').strip()
+        url = img.get("src", "").strip()
+        alt = img.get("alt", "").strip()
         if not url:
             continue
-        
+
         original_url = url
-        
+
         # Normalize relative URLs
-        if not url.startswith('http://') and not url.startswith('https://'):
+        if not url.startswith("http://") and not url.startswith("https://"):
             url = f"https://github.com/{owner}/{name}/raw/{default_branch}/{url.lstrip('./').lstrip('/')}"
-        
-        image_urls.append({'url': url, 'alt': alt, 'original_url': original_url})
-    
+
+        image_urls.append({"url": url, "alt": alt, "original_url": original_url})
+
     # Quick pre-filter before fetching
     filtered_urls = []
     for item in image_urls:
-        url = item['url']
+        url = item["url"]
         url_lower = url.lower()
-        
+
         # Skip known badge domains
-        if any(x in url_lower for x in ['shields.io', 'badge', 'travis-ci.org', 'circleci.com']):
+        if any(
+            x in url_lower
+            for x in ["shields.io", "badge", "travis-ci.org", "circleci.com"]
+        ):
             continue
-        
+
         # Skip videos
-        if any(url_lower.endswith(x) for x in ['.mp4', '.webm', '.mov', '.avi']):
+        if any(url_lower.endswith(x) for x in [".mp4", ".webm", ".mov", ".avi"]):
             continue
-        
+
         filtered_urls.append(item)
-    
+
     # Helper function to fetch dimensions for a single image
     def fetch_image_dimensions(item: Dict[str, str]) -> Dict[str, Any]:
-        url = item['url']
-        
+        url = item["url"]
+
         # Try partial download first (faster, saves bandwidth)
         try:
-            response = requests.get(url, timeout=5, stream=True, headers={'Range': 'bytes=0-50000'})
+            response = requests.get(
+                url, timeout=5, stream=True, headers={"Range": "bytes=0-50000"}
+            )
             if response.status_code in (200, 206):  # 206 = Partial Content
                 image_data = BytesIO(response.content)
                 img = Image.open(image_data)
-                return {
-                    **item,
-                    'width': img.width,
-                    'height': img.height,
-                    'error': None
-                }
+                return {**item, "width": img.width, "height": img.height, "error": None}
         except Exception:
             pass
-        
+
         # Fallback to full download
         try:
             response = requests.get(url, timeout=5)
             response.raise_for_status()
             image_data = BytesIO(response.content)
             img = Image.open(image_data)
-            return {
-                **item,
-                'width': img.width,
-                'height': img.height,
-                'error': None
-            }
+            return {**item, "width": img.width, "height": img.height, "error": None}
         except Exception as e:
-            return {
-                **item,
-                'width': None,
-                'height': None,
-                'error': str(e)
-            }
-    
+            return {**item, "width": None, "height": None, "error": str(e)}
+
     # Fetch dimensions in parallel (max 10 concurrent requests)
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    
+
     results = []
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(fetch_image_dimensions, item) for item in filtered_urls]
+        futures = [
+            executor.submit(fetch_image_dimensions, item) for item in filtered_urls
+        ]
         for future in as_completed(futures):
             results.append(future.result())
-    
+
     # Filter by size and aspect ratio
     gallery: List[Dict[str, Any]] = []
     for result in results:
-        if result['error']:
-            print(f"[debug] Failed to get dimensions for {result['url']}: {result['error']}")
+        if result["error"]:
+            print(
+                f"[debug] Failed to get dimensions for {result['url']}: {result['error']}"
+            )
             continue
-        
-        width = result['width']
-        height = result['height']
-        
+
+        width = result["width"]
+        height = result["height"]
+
         if not width or not height:
             continue
-        
+
         aspect_ratio = width / height
-        
+
         # Must be reasonably large and rectangular-ish
         if width >= 400 and 0.3 <= aspect_ratio <= 4.0:
             taken_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-            gallery.append({
-                'url': result['url'],
-                'alt': result['alt'],
-                'width': width,
-                'height': height,
-                'original_url': result['original_url'],
-                'taken_at': taken_at,
-                'is_highlight': True,
-            })
+            gallery.append(
+                {
+                    "url": result["url"],
+                    "alt": result["alt"],
+                    "width": width,
+                    "height": height,
+                    "original_url": result["original_url"],
+                    "taken_at": taken_at,
+                    "is_highlight": True,
+                }
+            )
         else:
             # Log filtered images for debugging
             reasons = []
@@ -817,35 +873,43 @@ def _extract_repo_media_data(owner: str, name: str) -> tuple[Optional[str], List
                 reasons.append(f"too tall (aspect={aspect_ratio:.2f})")
             if aspect_ratio > 4.0:
                 reasons.append(f"too wide (aspect={aspect_ratio:.2f})")
-            print(f"[debug] Filtered out {result['url']}: {', '.join(reasons)} ({width}x{height})")
-    
+            print(
+                f"[debug] Filtered out {result['url']}: {', '.join(reasons)} ({width}x{height})"
+            )
+
     # If no images found but has homepage link, capture screenshot
     if not gallery and link:
-        print(f"[debug] No README images found, attempting to screenshot website: {link}")
+        print(
+            f"[debug] No README images found, attempting to screenshot website: {link}"
+        )
         screenshot_bytes = _capture_website_screenshot(link)
-        
+
         if screenshot_bytes:
             # Upload to Cloudinary
             public_id = f"{owner}_{name}".replace("/", "_")
             cloudinary_url = _upload_to_cloudinary(screenshot_bytes, public_id)
-            
+
             if cloudinary_url:
                 taken_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-                gallery.append({
-                    'url': cloudinary_url,
-                    'alt': f'Screenshot of {link}',
-                    'width': 1280,
-                    'height': 720,
-                    'original_url': link,
-                    'taken_at': taken_at,
-                    'is_highlight': True,
-                })
-                print(f"[debug] Successfully captured and uploaded screenshot: {cloudinary_url}")
+                gallery.append(
+                    {
+                        "url": cloudinary_url,
+                        "alt": f"Screenshot of {link}",
+                        "width": 1280,
+                        "height": 720,
+                        "original_url": link,
+                        "taken_at": taken_at,
+                        "is_highlight": True,
+                    }
+                )
+                print(
+                    f"[debug] Successfully captured and uploaded screenshot: {cloudinary_url}"
+                )
             else:
                 print(f"[debug] Failed to upload screenshot to Cloudinary")
         else:
             print(f"[debug] Failed to capture screenshot")
-    
+
     return link, gallery
 
 
@@ -875,12 +939,12 @@ def enhance_repo_media(repo_id: str) -> None:
     if not repo:
         # Create minimal repo subject if missing (shouldn't happen normally)
         repo = RepoSubject(id=repo_id, name=repo_id.split("/")[-1])
-    
+
     repo.link = link
-    
+
     # Merge with existing gallery, dedupe by URL
     existing_urls: set[str] = {img.url for img in repo.gallery}
-    
+
     num_added = 0
     for item in gallery:
         url = item.get("url", "").strip()
@@ -890,13 +954,24 @@ def enhance_repo_media(repo_id: str) -> None:
         repo.gallery.append(gallery_img)
         existing_urls.add(url)
         num_added += 1
-    
+
     upsert_repo_subject(conn, repo_id, repo)
-    
-    output = EnhanceRepoMediaOutput(link=link, gallery_count=len(repo.gallery), added=num_added)
-    set_work_status(conn, "enhance_repo_media", "repo", repo_id, "succeeded", output.model_dump_json())
+
+    output = EnhanceRepoMediaOutput(
+        link=link, gallery_count=len(repo.gallery), added=num_added
+    )
+    set_work_status(
+        conn,
+        "enhance_repo_media",
+        "repo",
+        repo_id,
+        "succeeded",
+        output.model_dump_json(),
+    )
     conn.commit()
-    print(f"[task] enhance_repo_media done repo={repo_id} link={bool(link)} gallery={len(gallery)}")
+    print(
+        f"[task] enhance_repo_media done repo={repo_id} link={bool(link)} gallery={len(gallery)}"
+    )
 
 
 def generate_repo_blurb(repo_id: str) -> None:
@@ -923,21 +998,25 @@ def generate_repo_blurb(repo_id: str) -> None:
     desc = ""
     try:
         print(f"[task] generate_repo_blurb cloning and analyzing {repo_id}")
-        
+
         # Use sophisticated repo analysis (same as scripts)
-        context, files_included = clone_and_analyze_repo(owner, name, count_tokens, verbose=True)
+        context, files_included = clone_and_analyze_repo(
+            owner, name, count_tokens, verbose=True
+        )
         full_prompt = f"{context}\n\n{BLURB_PROMPT}"
-        
-        print(f"[task] generate_repo_blurb analyzed {len(files_included)} files: {files_included}")
+
+        print(
+            f"[task] generate_repo_blurb analyzed {len(files_included)} files: {files_included}"
+        )
         print(f"[task] generate_repo_blurb token count: {count_tokens(full_prompt)}")
-        
+
         if count_tokens(full_prompt) < 5500:
             print(f"[task] generate_repo_blurb calling LLM")
             desc = _openrouter_chat(full_prompt) or ""
             print(f"[task] generate_repo_blurb LLM response length: {len(desc)}")
         else:
             print(f"[task] generate_repo_blurb prompt too long, skipping LLM call")
-            
+
     except Exception as e:
         print(f"[task] generate_repo_blurb ERROR during analysis: {e}")
         desc = ""
@@ -947,138 +1026,187 @@ def generate_repo_blurb(repo_id: str) -> None:
     if not repo:
         # Create minimal repo subject if missing
         repo = RepoSubject(id=repo_id, name=repo_id.split("/")[-1])
-    
+
     if desc:
         repo.generated_description = desc
         upsert_repo_subject(conn, repo_id, repo)
-    
+
     output = GenerateRepoBlurbOutput(description_len=len(desc))
-    set_work_status(conn, "generate_repo_blurb", "repo", repo_id, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn,
+        "generate_repo_blurb",
+        "repo",
+        repo_id,
+        "succeeded",
+        output.model_dump_json(),
+    )
     conn.commit()
     print(f"[task] generate_repo_blurb done repo={repo_id} has_desc={bool(desc)}")
 
 
-def embed_repos_batch(username: str, repo_ids: list[str]) -> None:
-    """Batch embed multiple repos for efficiency.
-    
-    Embeds repos after blurb generation using format: name + description + generated_description + language.
-    Processes repos in batches of 20 to minimize API calls.
-    Stores embeddings in subjects.embedding and tracks content hash for change detection.
-    
-    Automatically re-embeds if content changes (hash mismatch).
+def _embed_repos_batch_generic(
+    repo_ids: list[str],
+    subject_type: str,
+    work_kind: str,
+    update_embedding_func,
+    log_context: str = "",
+) -> None:
+    """Generic batch embedding for any repo subject type.
+
+    Args:
+        repo_ids: List of repo IDs to embed
+        subject_type: 'repo' or 'trending_repo'
+        work_kind: Work item kind for tracking (e.g., 'embed_repo')
+        update_embedding_func: Function to call to store embedding (takes conn, repo_id, embedding)
+        log_context: Optional context string for logging (e.g., username)
     """
-    print(f"[task] embed_repos_batch start username={username} repo_count={len(repo_ids)}")
-    conn = get_conn()
-    
+    log_prefix = f"{log_context} " if log_context else ""
+    print(
+        f"[task] _embed_repos_batch_generic start {log_prefix}type={subject_type} repo_count={len(repo_ids)}"
+    )
+
     if not repo_ids:
-        print(f"[task] embed_repos_batch: no repos to embed for username={username}")
+        print(
+            f"[task] _embed_repos_batch_generic: no repos to embed {log_prefix}type={subject_type}"
+        )
         return
-    
+
+    conn = get_conn()
+
     # Collect repos that need embedding
     repos_to_embed = []
     for repo_id in repo_ids:
-        repo = get_repo_subject(conn, repo_id)
-        
+        repo, _ = get_subject_with_embedding(conn, subject_type, repo_id)
+
         if not repo:
+            print(f"[task] {work_kind}: repo not found {repo_id}")
             continue
-        
+
         # Format content and compute hash
         embedding_content = format_repo_for_embedding(repo)
         content_hash = compute_embedding_hash(embedding_content)
-        
+
         # Check if already embedded with same content
-        work_item = get_work_item(conn, "embed_repo", "repo", repo_id)
-        if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
+        work_item = get_work_item(conn, work_kind, subject_type, repo_id)
+        if work_item and work_item.status == "succeeded" and work_item.output_json:
             try:
-                output_data = json.loads(work_item["output_json"])
+                output_data = json.loads(work_item.output_json)
                 stored_hash = output_data.get("content_hash")
                 if stored_hash == content_hash:
-                    print(f"[task] embed_repos_batch: cache hit {repo_id}")
+                    print(f"[task] {work_kind}: cache hit {repo_id}")
                     continue
                 else:
-                    print(f"[task] embed_repos_batch: content changed {repo_id}, re-embedding")
+                    print(
+                        f"[task] {work_kind}: content changed {repo_id}, re-embedding"
+                    )
             except Exception:
                 pass
-        
-        repos_to_embed.append((repo_id, repo, embedding_content, content_hash))
-    
+
+        repos_to_embed.append((repo_id, embedding_content, content_hash))
+
     if not repos_to_embed:
-        print(f"[task] embed_repos_batch: all repos already embedded for username={username}")
+        print(f"[task] {work_kind}: all repos already embedded {log_prefix}")
         return
-    
-    print(f"[task] embed_repos_batch: embedding {len(repos_to_embed)} repos for username={username}")
-    
+
+    print(f"[task] {work_kind}: embedding {len(repos_to_embed)} repos {log_prefix}")
+
     # Process in batches of 20
     BATCH_SIZE = 20
     for i in range(0, len(repos_to_embed), BATCH_SIZE):
-        batch = repos_to_embed[i:i+BATCH_SIZE]
+        batch = repos_to_embed[i : i + BATCH_SIZE]
         batch_ids = [item[0] for item in batch]
-        
-        print(f"[task] embed_repos_batch: batch {i//BATCH_SIZE + 1} ({len(batch)} repos): {batch_ids}")
-        
+
+        print(
+            f"[task] {work_kind}: batch {i//BATCH_SIZE + 1} ({len(batch)} repos): {batch_ids}"
+        )
+
         # Mark all as running
-        for repo_id, _, _, _ in batch:
-            set_work_status(conn, "embed_repo", "repo", repo_id, "running")
+        for repo_id, _, _ in batch:
+            set_work_status(conn, work_kind, subject_type, repo_id, "running")
         conn.commit()
-        
+
         # Call batch embedding API
+        texts = [item[1] for item in batch]  # embedding_content
         try:
-            texts = [item[2] for item in batch]  # embedding_content
             embeddings = get_embeddings_batch(texts)
-            print(f"[task] embed_repos_batch: received {len(embeddings)} embeddings")
+            print(f"[task] {work_kind}: received {len(embeddings)} embeddings")
         except Exception as e:
-            print(f"[task] embed_repos_batch: batch API call failed: {e}")
+            print(f"[task] {work_kind}: batch API call failed: {e}")
             # Mark all as failed
-            for repo_id, _, _, _ in batch:
+            for repo_id, _, _ in batch:
                 set_work_status(
                     conn,
-                    "embed_repo",
-                    "repo",
+                    work_kind,
+                    subject_type,
                     repo_id,
                     "failed",
                     json.dumps({"reason": f"batch_api_error: {e}"}),
                 )
             conn.commit()
             continue
-        
+
         # Store embeddings for each repo
-        for (repo_id, repo, content, content_hash), embedding in zip(batch, embeddings):
+        for (repo_id, content, content_hash), embedding in zip(batch, embeddings):
             try:
                 # Store embedding in database
-                update_repo_embedding(conn, repo_id, embedding)
-                
+                update_embedding_func(conn, repo_id, embedding)
+
                 # Mark success with content hash
-                output_json = json.dumps({"content_hash": content_hash, "embedding_dim": len(embedding)})
-                set_work_status(conn, "embed_repo", "repo", repo_id, "succeeded", output_json)
-                print(f"[task] embed_repos_batch: stored embedding for {repo_id}")
+                output_json = json.dumps(
+                    {"content_hash": content_hash, "embedding_dim": len(embedding)}
+                )
+                set_work_status(
+                    conn, work_kind, subject_type, repo_id, "succeeded", output_json
+                )
+                print(f"[task] {work_kind}: stored embedding for {repo_id}")
             except Exception as e:
-                print(f"[task] embed_repos_batch: failed to store embedding for {repo_id}: {e}")
+                print(
+                    f"[task] {work_kind}: failed to store embedding for {repo_id}: {e}"
+                )
                 set_work_status(
                     conn,
-                    "embed_repo",
-                    "repo",
+                    work_kind,
+                    subject_type,
                     repo_id,
                     "failed",
                     json.dumps({"reason": f"storage_error: {e}"}),
                 )
-        
+
         conn.commit()
-    
-    print(f"[task] embed_repos_batch: completed for username={username}")
+
+    print(f"[task] {work_kind}: completed {log_prefix}")
+
+
+def embed_repos_batch(username: str, repo_ids: list[str]) -> None:
+    """Batch embed user repos.
+
+    Embeds repos after blurb generation using format: name + description + generated_description + language.
+    Processes repos in batches of 20 to minimize API calls.
+    Stores embeddings in subjects.embedding and tracks content hash for change detection.
+
+    Automatically re-embeds if content changes (hash mismatch).
+    """
+    _embed_repos_batch_generic(
+        repo_ids=repo_ids,
+        subject_type="repo",
+        work_kind="embed_repo",
+        update_embedding_func=update_repo_embedding,
+        log_context=f"username={username}",
+    )
 
 
 def embed_user_profile(username: str) -> None:
     """Generate and store embedding for user profile.
-    
+
     Embeds user after highlighted repos are selected and blurbed.
     Format: bio + concatenated highlighted repo descriptions
     Stores embedding in subjects.embedding WHERE subject_type='user'
-    
+
     Automatically re-embeds if content changes (hash mismatch).
     """
     print(f"[task] embed_user_profile start username={username}")
     conn = get_conn()
-    
+
     # Load user subject
     user = get_user_subject(conn, username)
     if not user:
@@ -1093,32 +1221,36 @@ def embed_user_profile(username: str) -> None:
         conn.commit()
         print(f"[task] embed_user_profile FAILED username={username} reason=no_subject")
         return
-    
+
     # Get highlighted repo names from select_highlighted_repos work item
     highlighted_names = []
     work_item = get_work_item(conn, "select_highlighted_repos", "user", username)
-    if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
+    if work_item and work_item.status == "succeeded" and work_item.output_json:
         try:
-            data = json.loads(work_item["output_json"])
+            data = json.loads(work_item.output_json)
             highlighted_names = data.get("repos", [])
         except Exception:
             pass
-    
+
     if not highlighted_names:
-        print(f"[task] embed_user_profile: no highlighted repos for username={username}, embedding user only")
-    
+        print(
+            f"[task] embed_user_profile: no highlighted repos for username={username}, embedding user only"
+        )
+
     # Load full repo subjects for highlighted repos
     highlighted_repos = []
     repo_rows = get_user_repos(conn, username)
     repo_by_name = {}
     for repo_row in repo_rows:
         try:
-            repo_data = json.loads(repo_row["data_json"]) if repo_row["data_json"] else None
+            repo_data = (
+                json.loads(repo_row["data_json"]) if repo_row["data_json"] else None
+            )
             if repo_data and repo_data.get("name"):
                 repo_by_name[repo_data["name"]] = repo_row
         except Exception:
             continue
-    
+
     for repo_name in highlighted_names:
         if repo_name in repo_by_name:
             repo_row = repo_by_name[repo_name]
@@ -1126,35 +1258,43 @@ def embed_user_profile(username: str) -> None:
                 repo = RepoSubject.model_validate_json(repo_row["data_json"])
                 highlighted_repos.append(repo)
             except Exception as e:
-                print(f"[task] embed_user_profile: failed to parse repo {repo_name}: {e}")
+                print(
+                    f"[task] embed_user_profile: failed to parse repo {repo_name}: {e}"
+                )
                 continue
-    
+
     # Format content for embedding
     embedding_content = format_user_for_embedding(user, highlighted_repos)
     content_hash = compute_embedding_hash(embedding_content)
-    
+
     # Check if already embedded with same content
     work_item = get_work_item(conn, "embed_user_profile", "user", username)
-    if work_item and work_item["status"] == "succeeded" and work_item["output_json"]:
+    if work_item and work_item.status == "succeeded" and work_item.output_json:
         try:
-            output_data = json.loads(work_item["output_json"])
+            output_data = json.loads(work_item.output_json)
             stored_hash = output_data.get("content_hash")
             if stored_hash == content_hash:
-                print(f"[task] embed_user_profile cache hit username={username} (content unchanged)")
+                print(
+                    f"[task] embed_user_profile cache hit username={username} (content unchanged)"
+                )
                 return
             else:
-                print(f"[task] embed_user_profile content changed username={username}, re-embedding")
+                print(
+                    f"[task] embed_user_profile content changed username={username}, re-embedding"
+                )
         except Exception:
             pass
-    
+
     # Mark as running
     set_work_status(conn, "embed_user_profile", "user", username, "running")
-    
+
     # Generate embedding
     try:
         print(f"[task] embed_user_profile calling embedding API username={username}")
         embedding = get_embedding(embedding_content)
-        print(f"[task] embed_user_profile received embedding dim={len(embedding)} username={username}")
+        print(
+            f"[task] embed_user_profile received embedding dim={len(embedding)} username={username}"
+        )
     except Exception as e:
         set_work_status(
             conn,
@@ -1167,7 +1307,7 @@ def embed_user_profile(username: str) -> None:
         conn.commit()
         print(f"[task] embed_user_profile FAILED username={username} error={e}")
         return
-    
+
     # Store embedding in subjects table
     try:
         update_user_embedding(conn, username, embedding)
@@ -1182,17 +1322,40 @@ def embed_user_profile(username: str) -> None:
             json.dumps({"reason": f"storage_error: {e}"}),
         )
         conn.commit()
-        print(f"[task] embed_user_profile FAILED to store embedding username={username} error={e}")
+        print(
+            f"[task] embed_user_profile FAILED to store embedding username={username} error={e}"
+        )
         return
-    
+
     # Mark success with content hash
-    output_json = json.dumps({"content_hash": content_hash, "embedding_dim": len(embedding)})
-    set_work_status(conn, "embed_user_profile", "user", username, "succeeded", output_json)
+    output_json = json.dumps(
+        {"content_hash": content_hash, "embedding_dim": len(embedding)}
+    )
+    set_work_status(
+        conn, "embed_user_profile", "user", username, "succeeded", output_json
+    )
     conn.commit()
     print(f"[task] embed_user_profile done username={username}")
 
 
+def embed_trending_repos_batch(repo_ids: list[str]) -> None:
+    """Embed batch of trending repos.
+
+    Similar to embed_repos_batch but for trending_repo subject_type.
+    Uses same embedding logic (name + description + language).
+    Processes in batches of 20 to minimize API calls.
+    """
+    _embed_repos_batch_generic(
+        repo_ids=repo_ids,
+        subject_type="trending_repo",
+        work_kind="embed_trending_repo",
+        update_embedding_func=update_trending_repo_embedding,
+        log_context="",
+    )
+
+
 # -------------------- New task: extract emphasis from generated_description --------------------
+
 
 def extract_repo_emphasis(repo_id: str) -> None:
     """Extract technology emphasis array from generated_description and store it on the repo subject.
@@ -1231,7 +1394,9 @@ def extract_repo_emphasis(repo_id: str) -> None:
             json.dumps({"reason": "no_generated_description"}),
         )
         conn.commit()
-        print(f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=no_generated_description")
+        print(
+            f"[task] extract_repo_emphasis FAILED repo={repo_id} reason=no_generated_description"
+        )
         return
 
     prompt = (
@@ -1243,9 +1408,13 @@ def extract_repo_emphasis(repo_id: str) -> None:
     # Call LLM and parse strictly
     try:
         text = _openrouter_chat(prompt)
-        print(f"[task] extract_repo_keywords LLM returned: {bool(text)} (length={len(text) if text else 0})")
+        print(
+            f"[task] extract_repo_keywords LLM returned: {bool(text)} (length={len(text) if text else 0})"
+        )
         if text:
-            print(f"[task] extract_repo_keywords LLM RESPONSE BEGIN\n{text}\nLLM RESPONSE END")
+            print(
+                f"[task] extract_repo_keywords LLM RESPONSE BEGIN\n{text}\nLLM RESPONSE END"
+            )
         if not text:
             raise ValueError("empty_llm_response")
         data = parse_llm_json(text)
@@ -1270,14 +1439,24 @@ def extract_repo_emphasis(repo_id: str) -> None:
     # Persist emphasis and mark success
     repo.emphasis = emphasis_list
     upsert_repo_subject(conn, repo_id, repo)
-    
+
     output = ExtractRepoEmphasisOutput(emphasis=emphasis_list, count=len(emphasis_list))
-    set_work_status(conn, "extract_repo_emphasis", "repo", repo_id, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn,
+        "extract_repo_emphasis",
+        "repo",
+        repo_id,
+        "succeeded",
+        output.model_dump_json(),
+    )
     conn.commit()
-    print(f"[task] extract_repo_emphasis done repo={repo_id} count={len(emphasis_list)}")
+    print(
+        f"[task] extract_repo_emphasis done repo={repo_id} count={len(emphasis_list)}"
+    )
 
 
 # -------------------- New task: extract keywords (skills) from generated_description --------------------
+
 
 def extract_repo_keywords(repo_id: str) -> None:
     """Extract 1-4 conceptual skill keywords from generated_description and store on repo subject.
@@ -1316,7 +1495,9 @@ def extract_repo_keywords(repo_id: str) -> None:
             json.dumps({"reason": "no_generated_description"}),
         )
         conn.commit()
-        print(f"[task] extract_repo_keywords FAILED repo={repo_id} reason=no_generated_description")
+        print(
+            f"[task] extract_repo_keywords FAILED repo={repo_id} reason=no_generated_description"
+        )
         return
 
     prompt = (
@@ -1329,9 +1510,13 @@ def extract_repo_keywords(repo_id: str) -> None:
     try:
         print(f"[task] extract_repo_keywords PROMPT BEGIN\n{prompt}\nPROMPT END")
         text = _openrouter_chat(prompt)
-        print(f"[task] extract_repo_keywords LLM returned: {bool(text)} (length={len(text) if text else 0})")
+        print(
+            f"[task] extract_repo_keywords LLM returned: {bool(text)} (length={len(text) if text else 0})"
+        )
         if text:
-            print(f"[task] extract_repo_keywords LLM RESPONSE BEGIN\n{text}\nLLM RESPONSE END")
+            print(
+                f"[task] extract_repo_keywords LLM RESPONSE BEGIN\n{text}\nLLM RESPONSE END"
+            )
         if not text:
             raise ValueError("empty_llm_response")
         data = parse_llm_json(text)
@@ -1345,8 +1530,10 @@ def extract_repo_keywords(repo_id: str) -> None:
     except Exception as e:
         try:
             # Best-effort raw output logging to aid debugging when JSON parsing fails
-            if 'text' in locals() and text:
-                print(f"[task] extract_repo_keywords RAW RESPONSE BEGIN\n{text}\nRAW RESPONSE END")
+            if "text" in locals() and text:
+                print(
+                    f"[task] extract_repo_keywords RAW RESPONSE BEGIN\n{text}\nRAW RESPONSE END"
+                )
         except Exception:
             pass
         set_work_status(
@@ -1364,11 +1551,20 @@ def extract_repo_keywords(repo_id: str) -> None:
     # Persist keywords and mark success
     repo.keywords = keywords_list
     upsert_repo_subject(conn, repo_id, repo)
-    
+
     output = ExtractRepoKeywordsOutput(keywords=keywords_list, count=len(keywords_list))
-    set_work_status(conn, "extract_repo_keywords", "repo", repo_id, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn,
+        "extract_repo_keywords",
+        "repo",
+        repo_id,
+        "succeeded",
+        output.model_dump_json(),
+    )
     conn.commit()
-    print(f"[task] extract_repo_keywords done repo={repo_id} count={len(keywords_list)}")
+    print(
+        f"[task] extract_repo_keywords done repo={repo_id} count={len(keywords_list)}"
+    )
 
 
 def extract_repo_kind(repo_id: str) -> None:
@@ -1386,7 +1582,7 @@ def extract_repo_kind(repo_id: str) -> None:
     repo = get_repo_subject(conn, repo_id)
     if not repo:
         repo = RepoSubject(id=repo_id, name=repo_id.split("/")[-1])
-    
+
     desc = repo.generated_description or ""
 
     prompt = (
@@ -1404,8 +1600,15 @@ def extract_repo_kind(repo_id: str) -> None:
     # Persist and mark success (even if empty; minimal enforcement requested)
     repo.kind = phrase
     upsert_repo_subject(conn, repo_id, repo)
-    
+
     output = ExtractRepoKindOutput(kind=phrase)
-    set_work_status(conn, "extract_repo_kind", "repo", repo_id, "succeeded", output.model_dump_json())
+    set_work_status(
+        conn,
+        "extract_repo_kind",
+        "repo",
+        repo_id,
+        "succeeded",
+        output.model_dump_json(),
+    )
     conn.commit()
     print(f"[task] extract_repo_kind done repo={repo_id} kind_len={len(phrase)}")
