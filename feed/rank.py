@@ -15,11 +15,12 @@ from db import (
     get_user_languages,
     get_newest_trending_repo_age_hours,
     get_cached_recommendations_by_type,
+    get_repos_similarity_to_user,
 )
 from feed.sources import iter_highlight_repo_candidates, iter_trending_repo_candidates
 from feed.trending import fetch_and_store_trending_repos
 from feed.judge import judge_repo_for_user
-from models import ForYouRepoItem, RepoSubject, Recommendation
+from models import ForYouRepoItem, RepoSubject, Recommendation, UserSubject
 
 
 def _fatigue_penalty_hours(
@@ -165,15 +166,15 @@ def build_feed_for_user(
     sample_n: int | None = None,
     batch_size: int = 15
 ) -> list[ForYouRepoItem]:
-    """Build feed for user by judging candidates and ranking with LLM.
+    """Build feed for user using embedding similarity (community) or LLM judgment (trending).
     
     Args:
         conn: Database connection
         viewer_username: Username to build feed for
         source: "community" for highlight repos, "trending" for GitHub trending
         limit: Max items to return
-        sample_n: Number of candidates to sample (None = all)
-        batch_size: Number of candidates to judge in parallel per batch
+        sample_n: Number of candidates to sample (trending only, ignored for community)
+        batch_size: Number of candidates to judge in parallel per batch (trending only)
     
     Returns:
         List of ForYouRepoItem sorted by relevance
@@ -183,6 +184,122 @@ def build_feed_for_user(
         print(f"[rank] build_feed_for_user: user not found username={viewer_username} source={source}")
         return []
     
+    if source == "community":
+        # NEW: Fast embedding-based ranking (no LLM calls, no sampling)
+        return _build_feed_embeddings(conn, viewer_username, limit)
+    else:
+        # OLD: LLM-based judgment for trending (keeps existing logic)
+        return _build_feed_llm(conn, viewer_username, user, source, limit, sample_n, batch_size)
+
+
+def _build_feed_embeddings(
+    conn: Connection,
+    viewer_username: str,
+    limit: int = 30
+) -> list[ForYouRepoItem]:
+    """Build community feed using embedding similarity ranking.
+    
+    Fast path: computes cosine similarity between user and repo embeddings,
+    applies fatigue penalty, returns top N. Considers all candidates (no sampling).
+    """
+    now = time.time()
+    
+    # Get all candidates
+    candidates = list(iter_highlight_repo_candidates(conn, viewer_username))
+    print(f"[rank] build_feed_embeddings: username={viewer_username} candidates={len(candidates)}")
+    
+    if not candidates:
+        print(f"[rank] No candidates found")
+        return []
+    
+    # Extract repo IDs for similarity computation
+    candidate_repo_ids = [item_id for item_type, item_id, repo, author, ts in candidates]
+    
+    # Compute similarities
+    similarity_scores = get_repos_similarity_to_user(conn, viewer_username, candidate_repo_ids)
+    
+    if not similarity_scores:
+        print(f"[rank] No similarity scores computed (user or repo embeddings missing)")
+        return []
+    
+    # Build ranked list with fatigue adjustment
+    ranked: list[tuple[float, ForYouRepoItem, str, str]] = []
+    
+    for item_type, item_id, repo, author_username, github_ts in candidates:
+        # Skip repos without embeddings
+        similarity = similarity_scores.get(item_id)
+        if similarity is None:
+            continue
+        
+        # Get exposure data
+        rec = get_recommendation(conn, viewer_username, item_type, item_id)
+        times_shown = rec.times_shown if rec else 0
+        last_shown_at = rec.last_shown_at if rec else None
+        
+        # Compute fatigue penalty (convert hours to similarity penalty)
+        hours_since = (now - float(last_shown_at)) / 3600.0 if last_shown_at else 1e9
+        penalty_hours = _fatigue_penalty_hours(times_shown, hours_since)
+        similarity_penalty = penalty_hours / 240.0  # 240 hours = 1.0 similarity point
+        
+        # Apply fatigue to similarity
+        adjusted_score = similarity - similarity_penalty
+        
+        # Create feed item
+        feed_item = ForYouRepoItem(
+            **repo.model_dump(),
+            username=author_username,
+            is_ghost=False,
+        )
+        
+        ranked.append((adjusted_score, feed_item, item_type, item_id))
+        
+        print(f"[rank] {item_id}: similarity={similarity:.3f}, shown={times_shown}x, penalty={penalty_hours:.1f}h, adjusted={adjusted_score:.3f}")
+    
+    # Sort by adjusted score (descending)
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    
+    # Dedup by repo_id (keep highest scoring instance)
+    seen_repo_ids = set()
+    deduped = []
+    for score, item, item_type, item_id in ranked:
+        if item_id not in seen_repo_ids:
+            seen_repo_ids.add(item_id)
+            deduped.append((score, item, item_type, item_id))
+    
+    # Take top N
+    top = deduped[:limit]
+    items = [item for score, item, item_type, item_id in top]
+    
+    # Bump exposure counters for shown items
+    if items:
+        shown_keys = [(top[i][2], top[i][3]) for i in range(len(top))]  # (item_type, item_id)
+        bump_recommendation_exposures(conn, viewer_username, shown_keys, now)
+    
+    conn.commit()
+    
+    print(f"[rank] ===== FEED SUMMARY (EMBEDDINGS) =====")
+    print(f"[rank] Candidates evaluated: {len(candidates)}")
+    print(f"[rank] With embeddings: {len(ranked)}")
+    print(f"[rank] After dedup: {len(deduped)} (removed {len(ranked) - len(deduped)} duplicates)")
+    print(f"[rank] Final feed size: {len(items)}")
+    print(f"[rank] ========================================")
+    
+    return items
+
+
+def _build_feed_llm(
+    conn: Connection,
+    viewer_username: str,
+    user: UserSubject,
+    source: str,
+    limit: int = 30,
+    sample_n: int | None = None,
+    batch_size: int = 15
+) -> list[ForYouRepoItem]:
+    """Build feed using LLM judgment (for trending repos).
+    
+    Original logic: parallel LLM calls with caching.
+    """
     # Get candidates based on source
     if source == "trending":
         # Check if we need to refresh trending repos
@@ -197,12 +314,12 @@ def build_feed_for_user(
                     print(f"[rank] Failed to fetch trending repos: {e}")
         
         candidates = list(iter_trending_repo_candidates(conn, viewer_username))
-    else:  # community
-        candidates = list(iter_highlight_repo_candidates(conn, viewer_username))
+    else:
+        candidates = []
     
     now = time.time()
     original_count = len(candidates)
-    print(f"[rank] build_feed_for_user: username={viewer_username} source={source} candidates={original_count}")
+    print(f"[rank] build_feed_llm: username={viewer_username} source={source} candidates={original_count}")
     
     if sample_n is not None and len(candidates) > sample_n:
         candidates = random.sample(candidates, sample_n)
@@ -252,7 +369,7 @@ def build_feed_for_user(
     
     items = _finalize_ranked_feed(ranked, limit, viewer_username, conn, now)
     
-    print(f"[rank] ===== FEED SUMMARY =====")
+    print(f"[rank] ===== FEED SUMMARY (LLM) =====")
     print(f"[rank] Source: {source}")
     print(f"[rank] Candidates evaluated: {len(candidates)}")
     print(f"[rank] Included: {included_count}, Excluded: {excluded_count}")
@@ -269,6 +386,8 @@ def get_feed_from_cache(
 ) -> list[ForYouRepoItem]:
     """Build feed from cached recommendations only (fast, no LLM calls).
     
+    Used only for trending feed now. Community feed uses embeddings directly.
+    
     Args:
         conn: Database connection
         viewer_username: Username to build feed for
@@ -281,6 +400,10 @@ def get_feed_from_cache(
     Does NOT fetch candidates or run LLM judgments - purely reads from cache.
     """
     print(f"[rank] get_feed_from_cache: username={viewer_username} source={source}")
+    
+    # Community feed now uses embeddings directly
+    if source == "community":
+        return build_feed_for_user(conn, viewer_username, source="community", limit=limit)
     
     # Determine item_type based on source
     item_type = "trending_repo" if source == "trending" else "repo"

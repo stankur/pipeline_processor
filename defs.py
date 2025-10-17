@@ -15,7 +15,6 @@ from assets import (
     extract_repo_emphasis_asset,
     extract_repo_keywords_asset,
     extract_repo_kind_asset,
-    build_for_you_community_asset,
     build_for_you_trending_asset,
 )
 
@@ -32,7 +31,6 @@ all_assets = [
     extract_repo_emphasis_asset,
     extract_repo_keywords_asset,
     extract_repo_kind_asset,
-    build_for_you_community_asset,
     build_for_you_trending_asset,
 ]
 

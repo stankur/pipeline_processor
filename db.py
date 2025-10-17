@@ -913,3 +913,58 @@ def get_all_highlighted_repos_with_gallery(conn: Connection) -> list[dict]:
         })
     
     return results
+
+
+def get_repos_similarity_to_user(
+    conn: Connection,
+    viewer_username: str,
+    candidate_repo_ids: list[str]
+) -> dict[str, float]:
+    """Compute cosine similarity between user embedding and candidate repo embeddings.
+    
+    Args:
+        conn: Database connection
+        viewer_username: Username whose embedding to compare against
+        candidate_repo_ids: List of repo IDs to compute similarity for
+    
+    Returns:
+        Dict mapping repo_id -> similarity_score (range -1 to 1, higher = more similar)
+        Only includes repos that have embeddings.
+    
+    Uses pgvector's cosine distance operator: 1 - (embedding <=> user_embedding)
+    """
+    if not candidate_repo_ids:
+        return {}
+    
+    # Get user embedding
+    user_row = conn.execute(
+        "SELECT embedding FROM subjects WHERE subject_type='user' AND subject_id=%s",
+        (viewer_username,)
+    ).fetchone()
+    
+    if not user_row or not user_row['embedding']:
+        print(f"[db] get_repos_similarity_to_user: user embedding not found for {viewer_username}")
+        return {}
+    
+    user_embedding = user_row['embedding']
+    
+    # Query similarity for all candidate repos
+    # pgvector <=> is cosine distance (0 = identical, 2 = opposite)
+    # Convert to similarity: 1 - distance (range -1 to 1)
+    placeholders = ','.join(['%s'] * len(candidate_repo_ids))
+    query = f"""
+        SELECT subject_id, 1 - (embedding <=> %s) as similarity
+        FROM subjects
+        WHERE subject_type = 'repo'
+          AND subject_id IN ({placeholders})
+          AND embedding IS NOT NULL
+        ORDER BY similarity DESC
+    """
+    
+    params = [user_embedding, *candidate_repo_ids]
+    rows = conn.execute(query, params).fetchall()
+    
+    result = {row['subject_id']: float(row['similarity']) for row in rows}
+    
+    print(f"[db] get_repos_similarity_to_user: computed similarity for {len(result)}/{len(candidate_repo_ids)} repos")
+    return result

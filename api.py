@@ -404,38 +404,18 @@ def progress(username: str):
 
 @app.get("/for-you/<viewer_username>")
 def for_you(viewer_username: str):
-    """Fast For You feed from cached recommendations.
+    """Community For You feed using embedding similarity.
     
     Query params:
       - limit: max items to return (default 30)
     
-    Returns personalized feed using LLM judgments and fatigue ranking.
-    Use POST to rebuild/populate cache.
+    Returns personalized feed using embedding-based similarity ranking with fatigue penalty.
+    Fast - no LLM calls, no cache needed.
     """
     conn = get_conn()
     limit = int((request.args.get("limit") or "30").strip() or "30")
-    items = get_feed_from_cache(conn, viewer_username, limit=limit)
+    items = build_feed_for_user(conn, viewer_username, source="community", limit=limit)
     return jsonify({"repos": [item.model_dump() for item in items]})
-
-
-@app.post("/for-you/<viewer_username>")
-def build_for_you(viewer_username: str):
-    """Build For You feed by judging candidates (slow, populates cache).
-    
-    Query params:
-      - limit: max items to evaluate (default 30)
-    
-    Fetches candidates and runs LLM judgments to populate cache.
-    Use this periodically to refresh feed (e.g., every 10 minutes).
-    """
-    conn = get_conn()
-    limit = int((request.args.get("limit") or "30").strip() or "30")
-    items = build_feed_for_user(conn, viewer_username, limit=limit)
-    return jsonify({
-        "status": "completed",
-        "judged": len(items),
-        "repos": [item.model_dump() for item in items]
-    })
 
 
 @app.get("/for-you-trending/<viewer_username>")
