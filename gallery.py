@@ -22,15 +22,38 @@ def get_gallery_repos(conn: Connection, limit: int = 30) -> list[dict]:
     # Get all highlighted repos with gallery images
     repos_data = get_all_highlighted_repos_with_gallery(conn)
     
-    # Sort by GitHub timestamp descending (most recent first)
-    repos_data.sort(key=lambda r: r["github_timestamp"], reverse=True)
+    # Calculate scores with penalty for screenshot-only repos
+    SIX_MONTHS_SECONDS = 14 * 30 * 24 * 60 * 60
     
-    # Take top N
-    top_repos = repos_data[:limit]
+    scored_repos = []
+    for item in repos_data:
+        repo: RepoSubject = item["repo"]
+        
+        # Check if repo has any non-screenshot images (for penalty calculation)
+        non_screenshot_count = sum(
+            1 for img in repo.gallery
+            if not (img.url != img.original_url and "cloudinary" in img.url.lower())
+        )
+        
+        # Calculate score: penalize screenshot-only repos
+        score = item["github_timestamp"]
+        has_non_screenshot_images = non_screenshot_count > 0
+        
+        if not has_non_screenshot_images:
+            score -= SIX_MONTHS_SECONDS
+        
+        scored_repos.append({
+            "item": item,
+            "score": score,
+        })
     
-    # Format for API response
+    # Sort by score descending (most recent / least penalized first)
+    scored_repos.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Take top N and format for API response
     results = []
-    for item in top_repos:
+    for scored in scored_repos[:limit]:
+        item = scored["item"]
         repo: RepoSubject = item["repo"]
         author_username: str = item["author_username"]
         

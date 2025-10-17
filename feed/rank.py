@@ -171,8 +171,8 @@ def _build_feed_embeddings(
 
         # Compute fatigue penalty (convert hours to similarity penalty)
         hours_since = (now - float(last_shown_at)) / 3600.0 if last_shown_at else 1e9
-        penalty_hours = _fatigue_penalty_hours(times_shown, hours_since)
-        similarity_penalty = penalty_hours / 240.0  # 240 hours = 1.0 similarity point
+        penalty_hours = _fatigue_penalty_hours(times_shown/5, hours_since)
+        similarity_penalty = penalty_hours / 500.0  # 240 hours = 1.0 similarity point
 
         # Apply fatigue to similarity
         adjusted_score = similarity - similarity_penalty
