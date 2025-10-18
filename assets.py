@@ -34,6 +34,10 @@ class UserConfig(Config):
     username: str
 
 
+# ==================== CRITICAL PATH ASSETS ====================
+# These run sequentially to get the feed built as fast as possible
+
+
 @asset(metadata={"work_item_kinds": ["fetch_profile"], "scope": "user"})
 def fetch_profile_asset(config: UserConfig) -> None:
     """Fetch GitHub profile for the user."""
@@ -53,34 +57,6 @@ def fetch_repos_asset(config: UserConfig) -> None:
 def select_highlighted_repos_asset(config: UserConfig) -> None:
     """Select highlighted repos - reads from DB, no data passing."""
     select_highlighted_repos(config.username)
-
-
-@asset(
-    deps=[select_highlighted_repos_asset],
-    metadata={"work_item_kinds": ["infer_user_theme"], "scope": "user"},
-)
-def infer_user_theme_asset(config: UserConfig) -> None:
-    """Infer user theme based on highlighted repos - reads from DB."""
-    infer_user_theme(config.username)
-
-
-@asset(
-    deps=[fetch_repos_asset],
-    metadata={"work_item_kinds": ["enhance_repo_media"], "scope": "repo"},
-)
-def enhance_repo_media_asset(config: UserConfig) -> None:
-    """Enhance media for all user repos - extracts links and images from README."""
-    username = config.username
-    conn = get_conn()
-
-    # Get all user repos
-    user_repos = get_user_repos(conn, username)
-
-    # Enhance each repo
-    for repo_row in user_repos:
-        repo_id = repo_row.get("subject_id")
-        if repo_id:
-            enhance_repo_media(repo_id)
 
 
 @asset(
@@ -160,11 +136,68 @@ def embed_user_profile_asset(config: UserConfig) -> None:
 
 
 @asset(
-    deps=[generate_repo_blurb_asset],
+    deps=[embed_user_profile_asset],
+    metadata={"work_item_kinds": ["build_for_you_trending"], "scope": "user"},
+)
+def build_for_you_trending_asset(config: UserConfig) -> None:
+    """Build For You trending feed using embedding similarity."""
+    conn = get_conn()
+    build_feed_for_user(conn, config.username, source="trending", limit=30)
+
+
+# ==================== DEFERRED TASKS ====================
+# These run after the critical path completes
+
+
+@asset(
+    deps=[fetch_repos_asset, build_for_you_trending_asset],
+    metadata={"work_item_kinds": ["enhance_repo_media"], "scope": "repo"},
+)
+def enhance_repo_media_asset(config: UserConfig) -> None:
+    """Enhance media for all user repos - extracts links and images from README.
+    
+    Dependencies:
+    - fetch_repos_asset: functional (reads repo data from DB)
+    - build_for_you_trending_asset: ordering-only (deferred until critical path completes)
+    """
+    username = config.username
+    conn = get_conn()
+
+    # Get all user repos
+    user_repos = get_user_repos(conn, username)
+
+    # Enhance each repo
+    for repo_row in user_repos:
+        repo_id = repo_row.get("subject_id")
+        if repo_id:
+            enhance_repo_media(repo_id)
+
+
+@asset(
+    deps=[select_highlighted_repos_asset, build_for_you_trending_asset],
+    metadata={"work_item_kinds": ["infer_user_theme"], "scope": "user"},
+)
+def infer_user_theme_asset(config: UserConfig) -> None:
+    """Infer user theme based on highlighted repos - reads from DB.
+    
+    Dependencies:
+    - select_highlighted_repos_asset: functional (reads highlighted repos from DB)
+    - build_for_you_trending_asset: ordering-only (deferred until critical path completes)
+    """
+    infer_user_theme(config.username)
+
+
+@asset(
+    deps=[generate_repo_blurb_asset, build_for_you_trending_asset],
     metadata={"work_item_kinds": ["extract_repo_emphasis"], "scope": "repo"},
 )
 def extract_repo_emphasis_asset(config: UserConfig) -> None:
-    """Extract emphasis only for repos that successfully generated blurbs."""
+    """Extract emphasis only for repos that successfully generated blurbs.
+    
+    Dependencies:
+    - generate_repo_blurb_asset: functional (needs blurbs to extract from)
+    - build_for_you_trending_asset: ordering-only (deferred until critical path completes)
+    """
     username = config.username
     conn = get_conn()
     repo_ids = get_repos_with_successful_work_item(
@@ -175,11 +208,16 @@ def extract_repo_emphasis_asset(config: UserConfig) -> None:
 
 
 @asset(
-    deps=[generate_repo_blurb_asset],
+    deps=[generate_repo_blurb_asset, build_for_you_trending_asset],
     metadata={"work_item_kinds": ["extract_repo_keywords"], "scope": "repo"},
 )
 def extract_repo_keywords_asset(config: UserConfig) -> None:
-    """Extract keywords only for repos that successfully generated blurbs."""
+    """Extract keywords only for repos that successfully generated blurbs.
+    
+    Dependencies:
+    - generate_repo_blurb_asset: functional (needs blurbs to extract from)
+    - build_for_you_trending_asset: ordering-only (deferred until critical path completes)
+    """
     username = config.username
     conn = get_conn()
     repo_ids = get_repos_with_successful_work_item(
@@ -190,11 +228,16 @@ def extract_repo_keywords_asset(config: UserConfig) -> None:
 
 
 @asset(
-    deps=[generate_repo_blurb_asset],
+    deps=[generate_repo_blurb_asset, build_for_you_trending_asset],
     metadata={"work_item_kinds": ["extract_repo_kind"], "scope": "repo"},
 )
 def extract_repo_kind_asset(config: UserConfig) -> None:
-    """Extract a compact kind phrase only for repos that successfully generated blurbs."""
+    """Extract a compact kind phrase only for repos that successfully generated blurbs.
+    
+    Dependencies:
+    - generate_repo_blurb_asset: functional (needs blurbs to extract from)
+    - build_for_you_trending_asset: ordering-only (deferred until critical path completes)
+    """
     username = config.username
     conn = get_conn()
     repo_ids = get_repos_with_successful_work_item(
@@ -202,13 +245,3 @@ def extract_repo_kind_asset(config: UserConfig) -> None:
     )
     for repo_id in repo_ids:
         extract_repo_kind(repo_id)
-
-
-@asset(
-    deps=[embed_user_profile_asset],
-    metadata={"work_item_kinds": ["build_for_you_trending"], "scope": "user"},
-)
-def build_for_you_trending_asset(config: UserConfig) -> None:
-    """Build For You trending feed using embedding similarity."""
-    conn = get_conn()
-    build_feed_for_user(conn, config.username, source="trending", limit=30)

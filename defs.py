@@ -18,20 +18,21 @@ from assets import (
     build_for_you_trending_asset,
 )
 
-# All assets already have partitions defined
+# All assets in priority order (critical path first, then deferred tasks)
 all_assets = [
     fetch_profile_asset,
     fetch_repos_asset,
     select_highlighted_repos_asset,
-    infer_user_theme_asset,
-    enhance_repo_media_asset,
     generate_repo_blurb_asset,
     embed_repo_asset,
     embed_user_profile_asset,
+    build_for_you_trending_asset,
+    # Deferred tasks (run after critical path)
+    infer_user_theme_asset,
+    enhance_repo_media_asset,
     extract_repo_emphasis_asset,
     extract_repo_keywords_asset,
     extract_repo_kind_asset,
-    build_for_you_trending_asset,
 ]
 
 defs = Definitions(
