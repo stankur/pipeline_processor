@@ -105,6 +105,56 @@ def migrate_db() -> None:
             conn.execute(f"ALTER TABLE recommendations DROP COLUMN {col}")
             conn.commit()
 
+    # Migration 7: Replace embedding column with 1024-dim for Voyage AI + HNSW index
+    # Check if HNSW index exists (marker that migration already completed)
+    index_exists = conn.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_indexes 
+            WHERE tablename='subjects' 
+            AND indexname='idx_subjects_embedding_hnsw'
+        ) as has_index
+    """).fetchone()
+
+    if index_exists and index_exists.get("has_index"):
+        # Migration already completed - skip
+        print("[db] Embedding column already migrated to Voyage AI (1024-dim + HNSW)")
+    else:
+        # Need to migrate
+        print("[db] Migrating embedding column to Voyage AI (1024-dim + HNSW)...")
+        
+        # Check if old column exists and drop it
+        col_exists = conn.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='subjects' AND column_name='embedding'
+        """).fetchone()
+        
+        if col_exists and col_exists.get("column_name"):
+            conn.execute("ALTER TABLE subjects DROP COLUMN embedding")
+            print("[db] Dropped old embedding column")
+        
+        # Create new column with correct dimension
+        conn.execute("ALTER TABLE subjects ADD COLUMN embedding vector(1024)")
+        
+        # Create HNSW index (this is our marker that migration is complete)
+        conn.execute("""
+            CREATE INDEX idx_subjects_embedding_hnsw 
+            ON subjects USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+        """)
+        
+        # Reset all embedding work items to trigger re-embedding
+        conn.execute("""
+            UPDATE work_items 
+            SET status = 'pending', 
+                output_json = NULL, 
+                processed_at = NULL
+            WHERE kind IN ('embed_repo', 'embed_trending_repo', 'embed_user_profile')
+        """)
+        
+        conn.commit()
+        print("[db] Embedding migration complete - will re-embed with Voyage AI on next pipeline run")
+
     print("[db] Migrations complete")
 
 

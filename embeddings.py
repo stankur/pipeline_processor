@@ -1,16 +1,15 @@
-"""Embedding service for repo and user vectorization using DeepInfra API."""
+"""Embedding service for repo and user vectorization using Voyage AI."""
 import hashlib
 import os
-import requests
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import voyageai
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from models import RepoSubject, UserSubject
 
 
 # Model configuration
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
-EMBEDDING_DIM = 4096
-API_ENDPOINT = "https://api.deepinfra.com/v1/openai/embeddings"
+EMBEDDING_MODEL = "voyage-3-large"
+EMBEDDING_DIM = 1024
 
 
 def format_repo_for_embedding(repo: RepoSubject) -> str:
@@ -99,66 +98,49 @@ def compute_embedding_hash(text: str) -> str:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((requests.RequestException, ValueError))
 )
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Batch embed multiple texts using DeepInfra API.
+    """Batch embed multiple texts using Voyage AI.
     
     Args:
-        texts: List of text strings to embed (max ~5-10 for reasonable latency)
+        texts: List of text strings to embed (max ~20 for reasonable latency)
     
     Returns:
         List of embedding vectors in same order as input texts
     
     Raises:
         RuntimeError: If API key not configured
-        requests.HTTPError: On API errors
-        ValueError: If response format invalid
+        Exception: On API errors
     """
-    api_key = os.environ.get("DEEPINFRA_API_KEY", "").strip()
+    api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("DEEPINFRA_API_KEY not set")
+        raise RuntimeError("VOYAGE_API_KEY not set")
     
     if not texts:
         return []
     
-    print(f"[embeddings] Calling DeepInfra API for {len(texts)} texts")
+    print(f"[embeddings] Calling Voyage AI API for {len(texts)} texts")
     
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    # Initialize Voyage AI client
+    vo = voyageai.Client(api_key=api_key)
     
-    data = {
-        "model": EMBEDDING_MODEL,
-        "input": texts,
-        "encoding_format": "float",
-    }
+    # Call embedding API with batch of texts
+    result = vo.embed(
+        texts, 
+        model=EMBEDDING_MODEL, 
+        input_type="document"
+    )
     
-    response = requests.post(API_ENDPOINT, headers=headers, json=data, timeout=60)
+    # Extract embeddings from result
+    embeddings = result.embeddings
     
-    if not response.ok:
-        print(f"[embeddings] DeepInfra error {response.status_code}: {response.text}")
-    response.raise_for_status()
+    # Validate response
+    if len(embeddings) != len(texts):
+        raise ValueError(f"Expected {len(texts)} embeddings, got {len(embeddings)}")
     
-    result = response.json()
-    
-    # Extract embeddings in order
-    data_items = result.get("data", [])
-    if len(data_items) != len(texts):
-        raise ValueError(f"Expected {len(texts)} embeddings, got {len(data_items)}")
-    
-    # Sort by index to ensure correct order
-    data_items.sort(key=lambda x: x.get("index", 0))
-    
-    embeddings = []
-    for item in data_items:
-        embedding = item.get("embedding")
-        if not embedding or not isinstance(embedding, list):
-            raise ValueError("Invalid embedding format in response")
+    for embedding in embeddings:
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(f"Expected {EMBEDDING_DIM} dimensions, got {len(embedding)}")
-        embeddings.append(embedding)
     
     print(f"[embeddings] Successfully embedded {len(embeddings)} texts")
     return embeddings
@@ -175,4 +157,3 @@ def get_embedding(text: str) -> list[float]:
     """
     embeddings = get_embeddings_batch([text])
     return embeddings[0]
-
