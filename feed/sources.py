@@ -5,9 +5,8 @@ from datetime import datetime
 from psycopg import Connection
 from models import UserSubject, RepoSubject, ItemType, ForYouUserItem
 from db import (
-    get_user_repos,
+    get_all_highlighted_repos_batch,
     select_best_repo_candidate,
-    iter_users_with_highlights,
     get_user_subject,
     get_user_languages,
     get_trending_repos_by_languages,
@@ -34,44 +33,46 @@ def iter_highlight_repo_candidates(conn: Connection, viewer_username: str) -> It
       2) prefer external original (owner != user)
       3) newest subjects.updated_at
     """
-    for author_username, user in iter_users_with_highlights(conn):
-        repo_rows = get_user_repos(conn, author_username)
+    all_rows = get_all_highlighted_repos_batch(conn, viewer_username)
+    
+    key_to_candidates: dict[tuple[str, str], list[tuple[RepoSubject, dict]]] = {}
+    
+    for row in all_rows:
+        author_username = row["author_username"]
+        highlighted_name = row["highlighted_name"]
+        data_json = row.get("data_json")
         
-        # Index by bare name (like existing for-you logic)
-        name_to_candidates: dict[str, list[tuple[RepoSubject, dict]]] = {}
-        for rr in repo_rows:
-            data_json = rr.get("data_json")
-            if not data_json:
-                continue
-            try:
-                repo = RepoSubject.model_validate_json(data_json)
-            except Exception:
-                continue
-            name_to_candidates.setdefault(repo.name, []).append((repo, rr))
+        if not data_json:
+            continue
+            
+        try:
+            repo = RepoSubject.model_validate_json(data_json)
+        except Exception:
+            continue
         
-        for repo_name in user.highlighted_repos:
-            candidates = name_to_candidates.get(repo_name)
-            if not candidates:
+        key = (author_username, highlighted_name)
+        key_to_candidates.setdefault(key, []).append((repo, row))
+    
+    for (author_username, highlighted_name), candidates in key_to_candidates.items():
+        if not candidates:
+            continue
+        
+        repo, row = select_best_repo_candidate(candidates, author_username)
+        
+        if isinstance(repo.id, str) and '/' in repo.id:
+            owner = repo.id.split('/')[0]
+            if owner.lower() == viewer_username.lower():
                 continue
-            
-            repo, rr = select_best_repo_candidate(candidates, author_username)
-            
-            # Exclude repos owned by the viewer (case-insensitive)
-            if isinstance(repo.id, str) and '/' in repo.id:
-                owner = repo.id.split('/')[0]
-                if owner.lower() == viewer_username.lower():
-                    continue
-            
-            # Extract GitHub timestamp
-            ts_str = repo.pushed_at or repo.updated_at
-            if not ts_str:
-                continue
-            try:
-                github_ts = datetime.fromisoformat(ts_str).timestamp()
-            except Exception:
-                continue
-            
-            yield ("repo", repo.id, repo, author_username, github_ts)
+        
+        ts_str = repo.pushed_at or repo.updated_at
+        if not ts_str:
+            continue
+        try:
+            github_ts = datetime.fromisoformat(ts_str).timestamp()
+        except Exception:
+            continue
+        
+        yield ("repo", repo.id, repo, author_username, github_ts)
 
 
 def iter_trending_repo_candidates(conn: Connection, viewer_username: str) -> Iterator[Item]:

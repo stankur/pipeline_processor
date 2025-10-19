@@ -333,6 +333,43 @@ def select_best_repo_candidate(
     return max(candidates, key=_selection_key)
 
 
+def get_all_highlighted_repos_batch(conn: Connection, viewer_username: str) -> list[dict]:
+    """Fetch all highlighted repos for all users in a single query.
+    
+    Returns rows with: subject_id, data_json, updated_at, author_username, 
+    user_commit_days, highlighted_name.
+    """
+    query = """
+        WITH user_highlights AS (
+            SELECT 
+                u.subject_id as username,
+                jsonb_array_elements_text(u.data_json::jsonb->'highlighted_repos') as repo_name,
+                u.data_json as user_data
+            FROM subjects u
+            WHERE u.subject_type = 'user'
+              AND u.data_json::jsonb->'highlighted_repos' IS NOT NULL
+              AND jsonb_array_length(u.data_json::jsonb->'highlighted_repos') > 0
+              AND u.embedding IS NOT NULL
+        )
+        SELECT DISTINCT
+            s.subject_id,
+            s.data_json,
+            s.updated_at,
+            l.username as author_username,
+            l.user_commit_days,
+            uh.repo_name as highlighted_name
+        FROM user_highlights uh
+        JOIN user_repo_links l ON l.username = uh.username
+        JOIN subjects s ON s.subject_type = 'repo' AND s.subject_id = l.repo_id
+        WHERE s.data_json::json->>'name' = uh.repo_name
+          AND s.embedding IS NOT NULL
+        ORDER BY l.username, uh.repo_name, s.updated_at DESC
+    """
+    
+    rows = conn.execute(query).fetchall()
+    return [dict(row) for row in rows]
+
+
 def iter_users_with_highlights(conn: Connection):
     """Yield (username, UserSubject) for users with highlighted_repos.
 
