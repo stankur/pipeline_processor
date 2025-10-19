@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from psycopg import connect, Connection, Error
 from psycopg.rows import dict_row
-from models import UserSubject, RepoSubject, Recommendation, ItemType, WorkItem
+from models import UserSubject, RepoSubject, Recommendation, ItemType, WorkItem, HackernewsSubject
 
 
 def get_conn() -> Connection:
@@ -1023,6 +1023,32 @@ def update_user_embedding(
         raise
 
 
+def update_hackernews_embedding(
+    conn: Connection, hn_id: str, embedding: list[float]
+) -> None:
+    """Store embedding vector for a HN story.
+
+    Args:
+        conn: Database connection
+        hn_id: HN story ID
+        embedding: Embedding vector (list of floats)
+
+    Raises:
+        Error: If update fails
+    """
+    try:
+        # Convert embedding list to postgres vector format
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        conn.execute(
+            "UPDATE subjects SET embedding = %s WHERE subject_type='hackernews' AND subject_id=%s",
+            (embedding_str, hn_id),
+        )
+        print(f"[db] update_hackernews_embedding ok story={hn_id} dim={len(embedding)}")
+    except Error as e:
+        print(f"[db] update_hackernews_embedding error story={hn_id} err={e}")
+        raise
+
+
 def get_all_highlighted_repos_with_gallery(conn: Connection) -> list[dict]:
     """Get all highlighted repos with gallery images from all users.
 
@@ -1191,3 +1217,114 @@ def get_users_similarity_to_user(
 
     print(f"[db] get_users_similarity_to_user: computed similarity for {len(result)}/{len(candidate_usernames)} users")
     return result
+
+
+def get_all_hackernews(conn: Connection) -> list[dict]:
+    """Get all hackernews subjects from database.
+    
+    Returns list of dicts with keys: subject_id, data_json, embedding
+    """
+    query = """
+        SELECT subject_id, data_json, embedding
+        FROM subjects
+        WHERE subject_type = 'hackernews'
+        ORDER BY updated_at DESC
+    """
+    return conn.execute(query).fetchall()
+
+
+def get_hackernews_age(conn: Connection) -> float | None:
+    """Get age of oldest hackernews story in hours.
+    
+    Returns None if no hackernews stories exist.
+    """
+    row = conn.execute("""
+        SELECT MAX(updated_at) as newest
+        FROM subjects
+        WHERE subject_type = 'hackernews'
+    """).fetchone()
+    
+    if not row or not row["newest"]:
+        return None
+    
+    newest_epoch = row["newest"]
+    try:
+        now = time.time()
+        age_hours = (now - newest_epoch) / 3600.0
+        return age_hours
+    except Exception:
+        return None
+
+
+def get_hackernews_similarity_to_user(
+    conn: Connection,
+    username: str,
+    hn_ids: list[str],
+) -> dict[str, float]:
+    """Compute cosine similarity between user embedding and HN stories.
+    
+    Args:
+        conn: Database connection
+        username: Username whose embedding to compare against
+        hn_ids: List of HN story IDs to compute similarity for
+    
+    Returns:
+        Dict mapping hn_id -> similarity_score (range -1 to 1, higher = more similar)
+        Only includes stories that have embeddings.
+    """
+    if not hn_ids:
+        return {}
+    
+    placeholders = ", ".join(["%s"] * len(hn_ids))
+    query = f"""
+        WITH user_emb AS (
+            SELECT embedding FROM subjects
+            WHERE subject_type = 'user' AND subject_id = %s
+            AND embedding IS NOT NULL
+        )
+        SELECT 
+            subject_id,
+            1 - (embedding <=> (SELECT embedding FROM user_emb)) as similarity
+        FROM subjects
+        WHERE subject_type = 'hackernews'
+        AND subject_id IN ({placeholders})
+        AND embedding IS NOT NULL
+        AND (SELECT embedding FROM user_emb) IS NOT NULL
+    """
+    
+    rows = conn.execute(query, [username] + hn_ids).fetchall()
+    result = {row["subject_id"]: float(row["similarity"]) for row in rows}
+    
+    print(f"[db] get_hackernews_similarity_to_user: computed similarity for {len(result)}/{len(hn_ids)} stories")
+    return result
+
+
+def get_hackernews_subject(conn: Connection, hn_id: str) -> HackernewsSubject | None:
+    """Get a single HN story subject.
+    
+    Args:
+        conn: Database connection
+        hn_id: HN story ID
+    
+    Returns:
+        HackernewsSubject if found, None otherwise
+    """
+    row = get_subject(conn, "hackernews", hn_id)
+    if not row or not row.get("data_json"):
+        return None
+    
+    try:
+        return HackernewsSubject.model_validate_json(row["data_json"])
+    except Exception:
+        return None
+
+
+def upsert_hackernews_subject(conn: Connection, hn_id: str, hn: HackernewsSubject) -> None:
+    """Insert or update a HN story subject.
+    
+    Args:
+        conn: Database connection
+        hn_id: HN story ID
+        hn: HackernewsSubject model instance
+    """
+    upsert_subject(conn, "hackernews", hn_id, hn.model_dump_json())

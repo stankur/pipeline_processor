@@ -6,6 +6,7 @@ from typing import Literal
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg import Connection
+
 from db import (
     get_conn,
     get_user_subject,
@@ -17,11 +18,17 @@ from db import (
     get_repos_similarity_to_user,
     get_all_trending_repos,
     get_users_similarity_to_user,
+    get_hackernews_age,
+    get_all_hackernews,
+    get_hackernews_similarity_to_user,
+    update_hackernews_embedding,
 )
-from feed.sources import iter_highlight_repo_candidates, iter_trending_repo_candidates, iter_user_candidates
+from feed.sources import iter_highlight_repo_candidates, iter_trending_repo_candidates, iter_user_candidates, iter_hackernews_candidates
 from feed.trending import fetch_and_store_trending_repos
-from models import ForYouRepoItem, RepoSubject, Recommendation, UserSubject, ForYouUserItem
+from feed.hackernews import fetch_and_store_hackernews
+from models import ForYouRepoItem, RepoSubject, Recommendation, UserSubject, ForYouUserItem, ForYouHackernewsItem, HackernewsSubject
 from tasks import embed_trending_repos_batch
+from embeddings import format_hackernews_for_embedding, get_embeddings_batch
 
 
 def _fatigue_penalty_hours(
@@ -293,4 +300,140 @@ def build_user_feed(
     print(f"[rank] Final feed size: {len(items)}")
     print(f"[rank] ============================")
 
+    return items
+
+
+def build_hackernews_feed(
+    conn: Connection,
+    viewer_username: str,
+    limit: int = 30,
+) -> list[ForYouHackernewsItem]:
+    """Build HN story feed using embedding similarity.
+    
+    Args:
+        conn: Database connection
+        viewer_username: Username to build feed for
+        limit: Max stories to return
+    
+    Returns:
+        List of ForYouHackernewsItem sorted by relevance
+    """
+    now = time.time()
+    
+    user = get_user_subject(conn, viewer_username)
+    if not user:
+        print(f"[rank] build_hackernews_feed: viewer not found username={viewer_username}")
+        return []
+    
+    # Check if we need to refresh HN stories
+    age_hours = get_hackernews_age(conn)
+    if age_hours is None or age_hours > 6.0:
+        print(f"[rank] HN stories stale (age={age_hours}h), fetching fresh data...")
+        try:
+            fetch_and_store_hackernews(conn, limit=100)
+            
+            # Immediately embed new stories
+            all_hn = get_all_hackernews(conn)
+            stories_to_embed = []
+            
+            for row in all_hn:
+                if row.get("embedding"):
+                    continue
+                
+                hn_id = row["subject_id"]
+                data_json = row.get("data_json")
+                if not data_json:
+                    continue
+                
+                try:
+                    hn = HackernewsSubject.model_validate_json(data_json)
+                    text = format_hackernews_for_embedding(hn)
+                    stories_to_embed.append((hn_id, text))
+                except Exception:
+                    continue
+            
+            if stories_to_embed:
+                print(f"[rank] Embedding {len(stories_to_embed)} new HN stories...")
+                texts = [text for _, text in stories_to_embed]
+                embeddings = get_embeddings_batch(texts)
+                
+                for (hn_id, text), embedding in zip(stories_to_embed, embeddings):
+                    update_hackernews_embedding(conn, hn_id, embedding)
+                conn.commit()
+                
+        except Exception as e:
+            print(f"[rank] Failed to fetch/embed HN stories: {e}")
+    
+    # Get candidates
+    candidates = list(iter_hackernews_candidates(conn, viewer_username))
+    
+    print(f"[rank] build_hackernews_feed: username={viewer_username} candidates={len(candidates)}")
+    
+    if not candidates:
+        print(f"[rank] No HN candidates found")
+        return []
+    
+    # Extract story IDs for similarity computation
+    candidate_hn_ids = [item_id for item_type, item_id, hn, author, ts in candidates]
+    
+    # Compute similarities
+    similarity_scores = get_hackernews_similarity_to_user(
+        conn, viewer_username, candidate_hn_ids
+    )
+    
+    if not similarity_scores:
+        print(f"[rank] No similarity scores computed (user or HN embeddings missing)")
+        return []
+    
+    # Build ranked list with fatigue adjustment
+    ranked: list[tuple[float, ForYouHackernewsItem, str, str]] = []
+    
+    for item_type, item_id, hn, author, hn_time in candidates:
+        similarity = similarity_scores.get(item_id)
+        if similarity is None:
+            continue
+        
+        # Get exposure data
+        rec = get_recommendation(conn, viewer_username, item_type, item_id)
+        times_shown = rec.times_shown if rec else 0
+        last_shown_at = rec.last_shown_at if rec else None
+        
+        # Compute fatigue penalty
+        hours_since = (now - float(last_shown_at)) / 3600.0 if last_shown_at else 1e9
+        penalty_hours = _fatigue_penalty_hours(times_shown/5, hours_since)
+        similarity_penalty = penalty_hours / 500.0
+        
+        # Apply fatigue to similarity
+        adjusted_score = similarity - similarity_penalty
+        
+        # Create feed item with hn_url
+        feed_item = ForYouHackernewsItem(
+            **hn.model_dump(),
+            hn_url=f"https://news.ycombinator.com/item?id={hn.id}"
+        )
+        
+        ranked.append((adjusted_score, feed_item, item_type, item_id))
+        
+        print(f"[rank] {item_id}: similarity={similarity:.3f}, shown={times_shown}x, penalty={penalty_hours:.1f}h, adjusted={adjusted_score:.3f}")
+    
+    # Sort by adjusted score (descending)
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    
+    # Take top N
+    top = ranked[:limit]
+    items = [item for score, item, item_type, item_id in top]
+    
+    # Bump exposure counters
+    if items:
+        shown_keys = [(top[i][2], top[i][3]) for i in range(len(top))]
+        bump_recommendation_exposures(conn, viewer_username, shown_keys, now)
+    
+    conn.commit()
+    
+    print(f"[rank] ===== HN FEED SUMMARY =====")
+    print(f"[rank] Candidates evaluated: {len(candidates)}")
+    print(f"[rank] With embeddings: {len(ranked)}")
+    print(f"[rank] Final feed size: {len(items)}")
+    print(f"[rank] ===============================")
+    
     return items

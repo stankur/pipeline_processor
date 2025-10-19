@@ -27,7 +27,7 @@ from db import (
 )
 from defs import all_assets, asset_meta, defs as dag_defs
 from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
-from feed.rank import build_feed_for_user, build_user_feed
+from feed.rank import build_feed_for_user, build_user_feed, build_hackernews_feed
 from gallery import get_gallery_repos
 
 
@@ -491,6 +491,22 @@ def for_you_users(viewer_username: str):
     limit = int((request.args.get("limit") or "30").strip() or "30")
     items = build_user_feed(conn, viewer_username, limit=limit)
     return jsonify({"users": [item.model_dump() for item in items]})
+
+
+@app.get("/for-you-hackernews/<viewer_username>")
+def for_you_hackernews(viewer_username: str):
+    """HN story recommendations using embedding similarity.
+
+    Query params:
+      - limit: max stories to return (default 30)
+
+    Returns personalized HN feed with fatigue penalty.
+    Automatically refreshes stories if cache is stale (>6 hours).
+    """
+    conn = get_conn()
+    limit = int((request.args.get("limit") or "30").strip() or "30")
+    items = build_hackernews_feed(conn, viewer_username, limit=limit)
+    return jsonify({"stories": [item.model_dump() for item in items]})
 
 
 @app.get("/gallery")

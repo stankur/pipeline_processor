@@ -112,6 +112,10 @@ for-you-trending-build user="stankur" limit="30":
 for-you-users user="stankur" limit="30":
     @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you-users/{{user}}?limit={{limit}}" | jq || curl "http://localhost:8080/for-you-users/{{user}}?limit={{limit}}" | jq
 
+# For You Hacker News feed - personalized HN stories
+for-you-hackernews user="stankur" limit="30":
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you-hackernews/{{user}}?limit={{limit}}" | jq || curl "http://localhost:8080/for-you-hackernews/{{user}}?limit={{limit}}" | jq
+
 # Global gallery - highlighted repos with images (sorted by recency)
 # Usage: just gallery [limit]
 # Example: just gallery 10

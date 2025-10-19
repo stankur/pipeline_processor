@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 # -------------------- Type Aliases --------------------
 
-ItemType = Literal["repo", "trending_repo", "user"]
+ItemType = Literal["repo", "trending_repo", "user", "hackernews"]
 
 
 # -------------------- Gallery Image --------------------
@@ -86,6 +86,28 @@ class ForYouRepoItem(RepoSubject):
 
     username: str  # The user this repo is associated with
     is_ghost: bool = False  # Whether the associated user is a ghost
+
+
+class HackernewsSubject(BaseModel):
+    """HN story stored in subjects table (subject_type='hackernews').
+    
+    Represents a Hacker News story with metadata.
+    """
+    
+    id: str  # HN story ID (e.g., "45631503")
+    title: str
+    url: Optional[str] = None  # External article URL (None for Ask HN, etc.)
+    by: str  # HN username
+    score: int = 0
+    time: int  # Unix timestamp (seconds)
+    descendants: int = 0  # Number of comments
+    extracted_at: str  # ISO timestamp of when we fetched it
+
+
+class ForYouHackernewsItem(HackernewsSubject):
+    """HN item in the for-you feed."""
+    
+    hn_url: str  # HN discussion URL: f"https://news.ycombinator.com/item?id={id}"
 
 
 # -------------------- Work Item Output Models --------------------

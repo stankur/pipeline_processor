@@ -2,9 +2,10 @@
 import hashlib
 import os
 import voyageai
+from urllib.parse import urlparse
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from models import RepoSubject, UserSubject
+from models import RepoSubject, UserSubject, HackernewsSubject
 
 
 # Model configuration
@@ -86,6 +87,28 @@ def format_user_for_embedding(user: UserSubject, highlighted_repos: list[RepoSub
             if repo_parts:
                 parts.append("\n".join(repo_parts))
                 parts.append("")  # Empty line between repos
+    
+    return "\n".join(parts)
+
+
+def format_hackernews_for_embedding(hn: HackernewsSubject) -> str:
+    """Format HN story for embedding.
+    
+    Returns text in format:
+    {title}
+    {url_domain or "Ask HN"}
+    
+    Maximum content, minimal noise - no labels.
+    """
+    parts = []
+    
+    if hn.title:
+        parts.append(hn.title)
+    
+    if hn.url:
+        domain = urlparse(hn.url).netloc
+        if domain:
+            parts.append(domain)
     
     return "\n".join(parts)
 

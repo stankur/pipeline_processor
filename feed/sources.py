@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Iterator, Tuple
 from datetime import datetime
 from psycopg import Connection
-from models import UserSubject, RepoSubject, ItemType, ForYouUserItem
+
+from models import UserSubject, RepoSubject, ItemType, ForYouUserItem, HackernewsSubject
 from db import (
     get_all_highlighted_repos_batch,
     select_best_repo_candidate,
@@ -11,6 +12,7 @@ from db import (
     get_user_languages,
     get_trending_repos_by_languages,
     get_all_users_except_viewer,
+    get_all_hackernews,
 )
 
 # Item tuple: (item_type, item_id, repo_model, author_username, github_timestamp)
@@ -159,4 +161,31 @@ def iter_user_candidates(conn: Connection, viewer_username: str) -> Iterator[Tup
             continue
         
         yield ("user", username, user, float(updated_at))
+
+
+def iter_hackernews_candidates(conn: Connection, viewer_username: str) -> Iterator[Tuple[ItemType, str, HackernewsSubject, str, float]]:
+    """Yield HN story candidates for the viewer.
+    
+    Yields:
+        - item_type: 'hackernews'
+        - item_id: story.id
+        - hn_model: HackernewsSubject
+        - author: story.by (HN username)
+        - timestamp: story.time (Unix epoch seconds)
+    """
+    rows = get_all_hackernews(conn)
+    
+    for row in rows:
+        hn_id = row["subject_id"]
+        data_json = row.get("data_json")
+        
+        if not data_json:
+            continue
+        
+        try:
+            hn = HackernewsSubject.model_validate_json(data_json)
+        except Exception:
+            continue
+        
+        yield ("hackernews", hn_id, hn, hn.by, float(hn.time))
 
