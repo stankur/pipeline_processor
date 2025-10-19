@@ -363,6 +363,27 @@ def iter_users_with_highlights(conn: Connection):
         yield (username, user)
 
 
+def get_all_users_except_viewer(conn: Connection, viewer_username: str) -> list[dict]:
+    """Get all users except the viewer (case-insensitive).
+    
+    Returns rows with: subject_id, data_json, updated_at
+    Only includes users with embeddings.
+    """
+    rows = conn.execute(
+        """
+        SELECT subject_id, data_json, updated_at
+        FROM subjects
+        WHERE subject_type = 'user'
+          AND LOWER(subject_id) != LOWER(%s)
+          AND embedding IS NOT NULL
+        ORDER BY updated_at DESC
+        """,
+        (viewer_username,),
+    ).fetchall()
+    
+    return [dict(row) for row in rows]
+
+
 def set_work_status(
     conn: Connection,
     kind: str,
@@ -1081,4 +1102,55 @@ def get_repos_similarity_to_user(
     print(
         f"[db] get_repos_similarity_to_user: computed similarity for {len(result)}/{len(candidate_repo_ids)} repos (type={subject_type})"
     )
+    return result
+
+
+def get_users_similarity_to_user(
+    conn: Connection,
+    viewer_username: str,
+    candidate_usernames: list[str],
+) -> dict[str, float]:
+    """Compute cosine similarity between viewer and candidate user embeddings.
+
+    Args:
+        conn: Database connection
+        viewer_username: Username whose embedding to compare against
+        candidate_usernames: List of usernames to compute similarity for
+
+    Returns:
+        Dict mapping username -> similarity_score (range -1 to 1, higher = more similar)
+        Only includes users that have embeddings.
+    """
+    if not candidate_usernames:
+        return {}
+
+    # Get viewer embedding
+    viewer_row = conn.execute(
+        "SELECT embedding FROM subjects WHERE subject_type='user' AND subject_id=%s",
+        (viewer_username,),
+    ).fetchone()
+
+    if not viewer_row or not viewer_row["embedding"]:
+        print(f"[db] get_users_similarity_to_user: viewer embedding not found for {viewer_username}")
+        return {}
+
+    viewer_embedding = viewer_row["embedding"]
+
+    # Query similarity for all candidate users
+    placeholders = ",".join(["%s"] * len(candidate_usernames))
+    query = f"""
+        SELECT subject_id, 1 - (embedding <=> %s) as similarity
+        FROM subjects
+        WHERE subject_type = 'user'
+          AND subject_id IN ({placeholders})
+          AND embedding IS NOT NULL
+        ORDER BY similarity DESC
+    """
+
+    params = [viewer_embedding, *candidate_usernames]
+    rows = conn.execute(query, params).fetchall()
+
+    result = {row["subject_id"]: float(row["similarity"]) for row in rows}
+
+    print(f"[db] get_users_similarity_to_user: computed similarity for {len(result)}/{len(candidate_usernames)} users")
     return result

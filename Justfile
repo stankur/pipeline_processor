@@ -108,6 +108,10 @@ for-you-trending user="stankur" limit="30":
 for-you-trending-build user="stankur" limit="30":
     @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you-trending/{{user}}?limit={{limit}}" | jq || curl -X POST "http://localhost:8080/for-you-trending/{{user}}?limit={{limit}}" | jq
 
+# For You Users feed - similar users
+for-you-users user="stankur" limit="30":
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" "http://localhost:8080/for-you-users/{{user}}?limit={{limit}}" | jq || curl "http://localhost:8080/for-you-users/{{user}}?limit={{limit}}" | jq
+
 # Global gallery - highlighted repos with images (sorted by recency)
 # Usage: just gallery [limit]
 # Example: just gallery 10

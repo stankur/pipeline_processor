@@ -16,10 +16,11 @@ from db import (
     get_trending_repos_age_for_languages,
     get_repos_similarity_to_user,
     get_all_trending_repos,
+    get_users_similarity_to_user,
 )
-from feed.sources import iter_highlight_repo_candidates, iter_trending_repo_candidates
+from feed.sources import iter_highlight_repo_candidates, iter_trending_repo_candidates, iter_user_candidates
 from feed.trending import fetch_and_store_trending_repos
-from models import ForYouRepoItem, RepoSubject, Recommendation, UserSubject
+from models import ForYouRepoItem, RepoSubject, Recommendation, UserSubject, ForYouUserItem
 from tasks import embed_trending_repos_batch
 
 
@@ -223,5 +224,73 @@ def _build_feed_embeddings(
     )
     print(f"[rank] Final feed size: {len(items)}")
     print(f"[rank] ========================================")
+
+    return items
+
+
+def build_user_feed(
+    conn: Connection,
+    viewer_username: str,
+    limit: int = 30,
+) -> list[ForYouUserItem]:
+    """Build user recommendation feed using embedding similarity.
+
+    Args:
+        conn: Database connection
+        viewer_username: Username to build feed for
+        limit: Max users to return
+
+    Returns:
+        List of ForYouUserItem sorted by similarity (descending)
+    """
+    user = get_user_subject(conn, viewer_username)
+    if not user:
+        print(f"[rank] build_user_feed: viewer not found username={viewer_username}")
+        return []
+
+    # Get all user candidates
+    candidates = list(iter_user_candidates(conn, viewer_username))
+    
+    print(f"[rank] build_user_feed: username={viewer_username} candidates={len(candidates)}")
+
+    if not candidates:
+        print(f"[rank] No user candidates found")
+        return []
+
+    # Extract usernames for similarity computation
+    candidate_usernames = [username for item_type, username, user_model, ts in candidates]
+
+    # Compute similarities
+    similarity_scores = get_users_similarity_to_user(conn, viewer_username, candidate_usernames)
+
+    if not similarity_scores:
+        print(f"[rank] No similarity scores computed (viewer or candidate embeddings missing)")
+        return []
+
+    # Build ranked list (no fatigue penalty)
+    ranked: list[tuple[float, ForYouUserItem]] = []
+
+    for item_type, username, user_model, timestamp in candidates:
+        similarity = similarity_scores.get(username)
+        if similarity is None:
+            continue
+
+        feed_item = ForYouUserItem(**user_model.model_dump())
+        ranked.append((similarity, feed_item))
+
+        print(f"[rank] {username}: similarity={similarity:.3f}")
+
+    # Sort by similarity (descending)
+    ranked.sort(key=lambda t: t[0], reverse=True)
+
+    # Take top N
+    top = ranked[:limit]
+    items = [item for score, item in top]
+
+    print(f"[rank] ===== USER FEED SUMMARY =====")
+    print(f"[rank] Candidates evaluated: {len(candidates)}")
+    print(f"[rank] With embeddings: {len(ranked)}")
+    print(f"[rank] Final feed size: {len(items)}")
+    print(f"[rank] ============================")
 
     return items

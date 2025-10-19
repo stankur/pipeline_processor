@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 # -------------------- Type Aliases --------------------
 
-ItemType = Literal["repo", "trending_repo"]
+ItemType = Literal["repo", "trending_repo", "user"]
 
 
 # -------------------- Gallery Image --------------------
@@ -43,6 +43,11 @@ class UserSubject(BaseModel):
     theme: Optional[str] = None
     highlighted_repos: list[str] = Field(default_factory=list)
     is_ghost: bool = False
+
+
+class ForYouUserItem(UserSubject):
+    """User item in the for-you-users feed."""
+    pass  # Inherits all fields including is_ghost
 
 
 class RepoSubject(BaseModel):

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Iterator, Tuple
 from datetime import datetime
 from psycopg import Connection
-from models import UserSubject, RepoSubject, ItemType
+from models import UserSubject, RepoSubject, ItemType, ForYouUserItem
 from db import (
     get_user_repos,
     select_best_repo_candidate,
@@ -11,6 +11,7 @@ from db import (
     get_user_subject,
     get_user_languages,
     get_trending_repos_by_languages,
+    get_all_users_except_viewer,
 )
 
 # Item tuple: (item_type, item_id, repo_model, author_username, github_timestamp)
@@ -55,10 +56,11 @@ def iter_highlight_repo_candidates(conn: Connection, viewer_username: str) -> It
             
             repo, rr = select_best_repo_candidate(candidates, author_username)
             
-            # Exclude repos owned by the viewer
-            viewer_owner_prefix = f"{viewer_username}/"
-            if isinstance(repo.id, str) and repo.id.startswith(viewer_owner_prefix):
-                continue
+            # Exclude repos owned by the viewer (case-insensitive)
+            if isinstance(repo.id, str) and '/' in repo.id:
+                owner = repo.id.split('/')[0]
+                if owner.lower() == viewer_username.lower():
+                    continue
             
             # Extract GitHub timestamp
             ts_str = repo.pushed_at or repo.updated_at
@@ -129,4 +131,31 @@ def iter_trending_repo_candidates(conn: Connection, viewer_username: str) -> Ite
         owner = repo.id.split('/')[0] if '/' in repo.id else ""
         
         yield ("trending_repo", repo.id, repo, owner, github_ts)
+
+
+def iter_user_candidates(conn: Connection, viewer_username: str) -> Iterator[Tuple[ItemType, str, UserSubject, float]]:
+    """Yield all user candidates for viewer, excluding viewer themselves (case-insensitive).
+    
+    Yields:
+        - item_type: 'user'
+        - item_id: username (login)
+        - user_model: UserSubject
+        - timestamp: subjects.updated_at as epoch seconds
+    """
+    rows = get_all_users_except_viewer(conn, viewer_username)
+    
+    for row in rows:
+        username = row["subject_id"]
+        data_json = row.get("data_json")
+        updated_at = row.get("updated_at")
+        
+        if not data_json or not updated_at:
+            continue
+        
+        try:
+            user = UserSubject.model_validate_json(data_json)
+        except Exception:
+            continue
+        
+        yield ("user", username, user, float(updated_at))
 

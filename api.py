@@ -27,7 +27,7 @@ from db import (
 )
 from defs import all_assets, asset_meta, defs as dag_defs
 from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
-from feed.rank import build_feed_for_user
+from feed.rank import build_feed_for_user, build_user_feed
 from gallery import get_gallery_repos
 
 
@@ -475,6 +475,22 @@ def build_for_you_trending(viewer_username: str):
             "repos": [item.model_dump() for item in items],
         }
     )
+
+
+@app.get("/for-you-users/<viewer_username>")
+def for_you_users(viewer_username: str):
+    """User recommendations feed using embedding similarity.
+
+    Query params:
+      - limit: max users to return (default 30)
+
+    Returns list of similar users based on profile embeddings.
+    No fatigue penalty - simple similarity ranking.
+    """
+    conn = get_conn()
+    limit = int((request.args.get("limit") or "30").strip() or "30")
+    items = build_user_feed(conn, viewer_username, limit=limit)
+    return jsonify({"users": [item.model_dump() for item in items]})
 
 
 @app.get("/gallery")
