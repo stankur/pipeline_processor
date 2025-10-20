@@ -1,9 +1,10 @@
 import time
 import os
+import uuid
 from datetime import datetime
 from psycopg import connect, Connection, Error
 from psycopg.rows import dict_row
-from models import UserSubject, RepoSubject, Recommendation, ItemType, WorkItem, HackernewsSubject
+from models import UserSubject, RepoSubject, Recommendation, ItemType, WorkItem, HackernewsSubject, UserContext
 
 
 def get_conn() -> Connection:
@@ -154,6 +155,45 @@ def migrate_db() -> None:
         
         conn.commit()
         print("[db] Embedding migration complete - will re-embed with Voyage AI on next pipeline run")
+
+    # Migration 8: Create user_contexts table for user-provided context
+    table_exists = conn.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_name='user_contexts'
+        ) as has_table
+    """).fetchone()
+
+    if not table_exists or not table_exists.get("has_table"):
+        print("[db] Creating user_contexts table...")
+        
+        conn.execute("""
+            CREATE TABLE user_contexts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                embedding vector(1024),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        
+        # Create indexes
+        conn.execute("""
+            CREATE INDEX idx_user_contexts_user_id 
+            ON user_contexts(user_id)
+        """)
+        
+        conn.execute("""
+            CREATE INDEX idx_user_contexts_embedding 
+            ON user_contexts USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+        """)
+        
+        conn.commit()
+        print("[db] Created user_contexts table with indexes")
+    else:
+        print("[db] user_contexts table already exists")
 
     print("[db] Migrations complete")
 
@@ -1299,6 +1339,100 @@ def get_hackernews_similarity_to_user(
     return result
 
 
+def get_hackernews_similarity_to_user_with_contexts(
+    conn: Connection,
+    viewer_username: str,
+    hn_ids: list[str],
+) -> dict[str, float]:
+    """Compute MAX similarity between HN stories and (user profile OR any user context).
+    
+    For each HN story, returns max(
+        similarity_to_profile,
+        similarity_to_context_1,
+        similarity_to_context_2,
+        ...
+    )
+    
+    Works even if user has no profile embedding, as long as they have contexts.
+    
+    Args:
+        conn: Database connection
+        viewer_username: Username whose embeddings to compare against
+        hn_ids: List of HN story IDs to compute similarity for
+    
+    Returns:
+        Dict mapping hn_id -> max_similarity_score
+    """
+    if not hn_ids:
+        return {}
+    
+    # Get user profile embedding (may be None)
+    user_row = conn.execute(
+        "SELECT embedding FROM subjects WHERE subject_type='user' AND subject_id=%s",
+        (viewer_username,),
+    ).fetchone()
+    
+    profile_embedding = user_row["embedding"] if (user_row and user_row["embedding"]) else None
+    
+    # Get user context embeddings
+    context_rows = conn.execute(
+        "SELECT embedding FROM user_contexts WHERE user_id=%s AND embedding IS NOT NULL",
+        (viewer_username,),
+    ).fetchall()
+    
+    context_embeddings = [row["embedding"] for row in context_rows]
+    
+    # Need at least one embedding to compute similarity
+    if not profile_embedding and not context_embeddings:
+        print(f"[db] get_hackernews_similarity_to_user_with_contexts: no embeddings found for {viewer_username}")
+        return {}
+    
+    print(f"[db] get_hackernews_similarity_to_user_with_contexts: profile={'yes' if profile_embedding else 'no'}, contexts={len(context_embeddings)}")
+    
+    # Build similarity expressions based on available embeddings
+    similarity_exprs = []
+    params = []
+    
+    if profile_embedding:
+        similarity_exprs.append("1 - (embedding <=> %s)")
+        params.append(profile_embedding)
+    
+    for ctx_emb in context_embeddings:
+        similarity_exprs.append("1 - (embedding <=> %s)")
+        params.append(ctx_emb)
+    
+    # Build query
+    placeholders = ",".join(["%s"] * len(hn_ids))
+    
+    if len(similarity_exprs) == 1:
+        # Single embedding: no GREATEST needed
+        query = f"""
+            SELECT subject_id, {similarity_exprs[0]} as similarity
+            FROM subjects
+            WHERE subject_type = 'hackernews' AND subject_id IN ({placeholders})
+              AND embedding IS NOT NULL
+            ORDER BY similarity DESC
+        """
+    else:
+        # Multiple embeddings: use GREATEST
+        query = f"""
+            SELECT subject_id, 
+                   GREATEST({', '.join(similarity_exprs)}) as similarity
+            FROM subjects
+            WHERE subject_type = 'hackernews' AND subject_id IN ({placeholders})
+              AND embedding IS NOT NULL
+            ORDER BY similarity DESC
+        """
+    
+    params.extend(hn_ids)
+    
+    rows = conn.execute(query, params).fetchall()
+    result = {row["subject_id"]: float(row["similarity"]) for row in rows}
+    
+    print(f"[db] get_hackernews_similarity_to_user_with_contexts: computed for {len(result)}/{len(hn_ids)} stories")
+    return result
+
+
 def get_hackernews_subject(conn: Connection, hn_id: str) -> HackernewsSubject | None:
     """Get a single HN story subject.
     
@@ -1328,3 +1462,371 @@ def upsert_hackernews_subject(conn: Connection, hn_id: str, hn: HackernewsSubjec
         hn: HackernewsSubject model instance
     """
     upsert_subject(conn, "hackernews", hn_id, hn.model_dump_json())
+
+
+# -------------------- User Contexts CRUD --------------------
+
+
+def _parse_vector_column(value) -> list[float] | None:
+    """Parse pgvector column value to list[float].
+    
+    pgvector returns vectors as strings like '[0.1, 0.2, 0.3]'
+    This converts them to Python lists for Pydantic validation.
+    
+    Args:
+        value: Raw value from pgvector column (string, list, or None)
+    
+    Returns:
+        list[float] if value exists, None otherwise
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        import json
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
+    return None
+
+
+def create_user_context(conn: Connection, user_id: str, content: str) -> UserContext:
+    """Create a new user context and return it.
+    
+    Args:
+        conn: Database connection
+        user_id: Username
+        content: Context text content
+    
+    Returns:
+        UserContext model with generated ID
+    """
+    context_id = f"{user_id}:{uuid.uuid4()}"
+    now = time.time()
+    
+    conn.execute(
+        """
+        INSERT INTO user_contexts (id, user_id, content, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (context_id, user_id, content, now, now),
+    )
+    
+    print(f"[db] Created user context id={context_id} user_id={user_id}")
+    
+    return UserContext(
+        id=context_id,
+        user_id=user_id,
+        content=content,
+        embedding=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def get_user_contexts(conn: Connection, user_id: str) -> list[UserContext]:
+    """Get all contexts for a user, ordered by creation date (newest first).
+    
+    Returns:
+        List of UserContext models
+    """
+    rows = conn.execute(
+        """
+        SELECT id, user_id, content, embedding, created_at, updated_at
+        FROM user_contexts
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+        """,
+        (user_id,),
+    ).fetchall()
+    
+    # Parse pgvector strings to lists
+    contexts = []
+    for row in rows:
+        ctx_data = dict(row)
+        ctx_data['embedding'] = _parse_vector_column(ctx_data.get('embedding'))
+        contexts.append(UserContext(**ctx_data))
+    
+    return contexts
+
+
+def get_user_context(conn: Connection, context_id: str) -> UserContext | None:
+    """Get a single context by ID.
+    
+    Returns:
+        UserContext model or None if not found
+    """
+    row = conn.execute(
+        """
+        SELECT id, user_id, content, embedding, created_at, updated_at
+        FROM user_contexts
+        WHERE id = %s
+        """,
+        (context_id,),
+    ).fetchone()
+    
+    if not row:
+        return None
+    
+    # Parse pgvector string to list
+    ctx_data = dict(row)
+    ctx_data['embedding'] = _parse_vector_column(ctx_data.get('embedding'))
+    return UserContext(**ctx_data)
+
+
+def delete_user_context(conn: Connection, context_id: str) -> bool:
+    """Delete a user context.
+    
+    Returns:
+        True if deleted, False if not found
+    """
+    result = conn.execute(
+        "DELETE FROM user_contexts WHERE id = %s",
+        (context_id,),
+    )
+    deleted = result.rowcount > 0
+    print(f"[db] Deleted user context id={context_id} success={deleted}")
+    return deleted
+
+
+def update_context_embedding(conn: Connection, context_id: str, embedding: list[float]) -> None:
+    """Store embedding for a user context.
+    
+    Args:
+        conn: Database connection
+        context_id: Context ID
+        embedding: Embedding vector (1024 dimensions)
+    """
+    now = time.time()
+    
+    conn.execute(
+        """
+        UPDATE user_contexts 
+        SET embedding = %s, updated_at = %s
+        WHERE id = %s
+        """,
+        (embedding, now, context_id),
+    )
+    print(f"[db] Updated embedding for context id={context_id}")
+
+
+def get_user_contexts_with_embeddings(conn: Connection, user_id: str) -> list[UserContext]:
+    """Get all contexts for a user that have embeddings.
+    
+    Returns:
+        List of UserContext models with non-null embeddings
+    """
+    rows = conn.execute(
+        """
+        SELECT id, user_id, content, embedding, created_at, updated_at
+        FROM user_contexts
+        WHERE user_id = %s AND embedding IS NOT NULL
+        ORDER BY created_at DESC
+        """,
+        (user_id,),
+    ).fetchall()
+    
+    # Parse pgvector strings to lists
+    contexts = []
+    for row in rows:
+        ctx_data = dict(row)
+        ctx_data['embedding'] = _parse_vector_column(ctx_data.get('embedding'))
+        contexts.append(UserContext(**ctx_data))
+    
+    return contexts
+
+
+def get_repos_similarity_to_user_with_contexts(
+    conn: Connection,
+    viewer_username: str,
+    candidate_repo_ids: list[str],
+    subject_type: str = "repo",
+) -> dict[str, float]:
+    """Compute MAX similarity between repos and (user profile OR any user context).
+    
+    For each candidate repo, returns max(
+        similarity_to_profile,
+        similarity_to_context_1,
+        similarity_to_context_2,
+        ...
+    )
+    
+    Works even if user has no profile embedding, as long as they have contexts.
+    
+    Args:
+        conn: Database connection
+        viewer_username: Username whose embeddings to compare against
+        candidate_repo_ids: List of repo IDs to compute similarity for
+        subject_type: Type of subject ('repo' or 'trending_repo')
+    
+    Returns:
+        Dict mapping repo_id -> max_similarity_score
+    """
+    if not candidate_repo_ids:
+        return {}
+    
+    # Get user profile embedding (may be None)
+    user_row = conn.execute(
+        "SELECT embedding FROM subjects WHERE subject_type='user' AND subject_id=%s",
+        (viewer_username,),
+    ).fetchone()
+    
+    profile_embedding = user_row["embedding"] if (user_row and user_row["embedding"]) else None
+    
+    # Get user context embeddings
+    context_rows = conn.execute(
+        "SELECT embedding FROM user_contexts WHERE user_id=%s AND embedding IS NOT NULL",
+        (viewer_username,),
+    ).fetchall()
+    
+    context_embeddings = [row["embedding"] for row in context_rows]
+    
+    # Need at least one embedding to compute similarity
+    if not profile_embedding and not context_embeddings:
+        print(f"[db] get_repos_similarity_to_user_with_contexts: no embeddings found for {viewer_username}")
+        return {}
+    
+    print(f"[db] get_repos_similarity_to_user_with_contexts: profile={'yes' if profile_embedding else 'no'}, contexts={len(context_embeddings)}")
+    
+    # Build similarity expressions based on available embeddings
+    similarity_exprs = []
+    params = []
+    
+    if profile_embedding:
+        similarity_exprs.append("1 - (embedding <=> %s)")
+        params.append(profile_embedding)
+    
+    for ctx_emb in context_embeddings:
+        similarity_exprs.append("1 - (embedding <=> %s)")
+        params.append(ctx_emb)
+    
+    # Build query
+    placeholders = ",".join(["%s"] * len(candidate_repo_ids))
+    
+    if len(similarity_exprs) == 1:
+        # Single embedding: no GREATEST needed
+        query = f"""
+            SELECT subject_id, {similarity_exprs[0]} as similarity
+            FROM subjects
+            WHERE subject_type = %s AND subject_id IN ({placeholders})
+              AND embedding IS NOT NULL
+            ORDER BY similarity DESC
+        """
+    else:
+        # Multiple embeddings: use GREATEST
+        query = f"""
+            SELECT subject_id, 
+                   GREATEST({', '.join(similarity_exprs)}) as similarity
+            FROM subjects
+            WHERE subject_type = %s AND subject_id IN ({placeholders})
+              AND embedding IS NOT NULL
+            ORDER BY similarity DESC
+        """
+    
+    params.extend([subject_type, *candidate_repo_ids])
+    
+    rows = conn.execute(query, params).fetchall()
+    result = {row["subject_id"]: float(row["similarity"]) for row in rows}
+    
+    print(f"[db] get_repos_similarity_to_user_with_contexts: computed for {len(result)}/{len(candidate_repo_ids)} repos")
+    return result
+
+
+def get_users_similarity_to_user_with_contexts(
+    conn: Connection,
+    viewer_username: str,
+    candidate_usernames: list[str],
+) -> dict[str, float]:
+    """Compute MAX similarity between viewer and candidate users using contexts.
+    
+    For each candidate user, returns max(
+        similarity_to_viewer_profile,
+        similarity_to_viewer_context_1,
+        similarity_to_viewer_context_2,
+        ...
+    )
+    
+    Works even if viewer has no profile embedding, as long as they have contexts.
+    This allows users without highlighted repos to still get personalized user recommendations.
+    
+    Args:
+        conn: Database connection
+        viewer_username: Username whose embeddings to compare against
+        candidate_usernames: List of usernames to compute similarity for
+    
+    Returns:
+        Dict mapping username -> max_similarity_score (range -1 to 1, higher = more similar)
+        Only includes users that have embeddings.
+    """
+    if not candidate_usernames:
+        return {}
+    
+    # Get viewer profile embedding (may be None)
+    viewer_row = conn.execute(
+        "SELECT embedding FROM subjects WHERE subject_type='user' AND subject_id=%s",
+        (viewer_username,),
+    ).fetchone()
+    
+    viewer_embedding = viewer_row["embedding"] if (viewer_row and viewer_row["embedding"]) else None
+    
+    # Get viewer context embeddings
+    context_rows = conn.execute(
+        "SELECT embedding FROM user_contexts WHERE user_id=%s AND embedding IS NOT NULL",
+        (viewer_username,),
+    ).fetchall()
+    
+    context_embeddings = [row["embedding"] for row in context_rows]
+    
+    # Need at least one embedding to compute similarity
+    if not viewer_embedding and not context_embeddings:
+        print(f"[db] get_users_similarity_to_user_with_contexts: no embeddings found for {viewer_username}")
+        return {}
+    
+    print(f"[db] get_users_similarity_to_user_with_contexts: profile={'yes' if viewer_embedding else 'no'}, contexts={len(context_embeddings)}")
+    
+    # Build similarity expressions based on available embeddings
+    similarity_exprs = []
+    params = []
+    
+    if viewer_embedding:
+        similarity_exprs.append("1 - (embedding <=> %s)")
+        params.append(viewer_embedding)
+    
+    for ctx_emb in context_embeddings:
+        similarity_exprs.append("1 - (embedding <=> %s)")
+        params.append(ctx_emb)
+    
+    # Build query
+    placeholders = ",".join(["%s"] * len(candidate_usernames))
+    
+    if len(similarity_exprs) == 1:
+        # Single embedding: no GREATEST needed
+        query = f"""
+            SELECT subject_id, {similarity_exprs[0]} as similarity
+            FROM subjects
+            WHERE subject_type = 'user'
+              AND subject_id IN ({placeholders})
+              AND embedding IS NOT NULL
+            ORDER BY similarity DESC
+        """
+    else:
+        # Multiple embeddings: use GREATEST
+        query = f"""
+            SELECT subject_id, 
+                   GREATEST({', '.join(similarity_exprs)}) as similarity
+            FROM subjects
+            WHERE subject_type = 'user'
+              AND subject_id IN ({placeholders})
+              AND embedding IS NOT NULL
+            ORDER BY similarity DESC
+        """
+    
+    params.extend(candidate_usernames)
+    
+    rows = conn.execute(query, params).fetchall()
+    result = {row["subject_id"]: float(row["similarity"]) for row in rows}
+    
+    print(f"[db] get_users_similarity_to_user_with_contexts: computed for {len(result)}/{len(candidate_usernames)} users")
+    return result

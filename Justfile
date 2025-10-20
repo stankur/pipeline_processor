@@ -158,6 +158,40 @@ db-ui:
 db-ui-stop:
     docker rm -f pgweb 2>/dev/null || true
 
+# User contexts management
+# Create a user context (for simple short text)
+create-context username content:
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:8080/contexts/{{username}} -F "content={{content}}" | jq || curl -X POST http://localhost:8080/contexts/{{username}} -F "content={{content}}" | jq
+
+# Create a user context from stdin (for long/complex text with special characters)
+# Usage: pbpaste | just create-context-stdin username
+# Or: cat file.txt | just create-context-stdin username
+# Or: echo "text" | just create-context-stdin username
+create-context-stdin username:
+    #!/usr/bin/env bash
+    content=$(cat)
+    if [ -n "$API_KEY" ]; then
+        curl -X POST -H "Authorization: Bearer $API_KEY" \
+             http://localhost:8080/contexts/{{username}} \
+             -F "content=$content" | jq
+    else
+        curl -X POST http://localhost:8080/contexts/{{username}} \
+             -F "content=$content" | jq
+    fi
+
+# List contexts for a user
+list-contexts username:
+    @[ -n "$API_KEY" ] && curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/contexts/{{username}} | jq || curl http://localhost:8080/contexts/{{username}} | jq
+
+# Delete a context
+delete-context context_id:
+    @[ -n "$API_KEY" ] && curl -X DELETE -H "Authorization: Bearer $API_KEY" http://localhost:8080/contexts/{{context_id}} | jq || curl -X DELETE http://localhost:8080/contexts/{{context_id}} | jq
+
+
+# Count contexts for a user
+count-contexts username:
+    @.venv/bin/python -c "from db import get_conn; conn = get_conn(); row = conn.execute('SELECT COUNT(*) as count FROM user_contexts WHERE user_id=%s', ('{{username}}',)).fetchone(); print(f'Contexts: {row[\"count\"]}')"
+
 # Type checking with BasedPyright
 typecheck:
     npx --yes basedpyright

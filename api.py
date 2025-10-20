@@ -24,11 +24,15 @@ from db import (
     get_repo_subject,
     upsert_user_subject,
     upsert_repo_subject,
+    create_user_context,
+    get_user_contexts,
+    delete_user_context,
 )
 from defs import all_assets, asset_meta, defs as dag_defs
 from models import UserSubject, RepoSubject, GalleryImage, ForYouRepoItem
 from feed.rank import build_feed_for_user, build_user_feed, build_hackernews_feed
 from gallery import get_gallery_repos
+from tasks import embed_user_context
 
 
 app = Flask(__name__)
@@ -801,6 +805,95 @@ def update_repo_gallery_image(username: str, owner: str, repo: str):
             pass
 
     return jsonify({"ok": True, "updated": updated})
+
+
+@app.post("/contexts/<username>")
+def create_context(username: str):
+    """Create a new context for a user and trigger embedding.
+    
+    Path params:
+        username: GitHub username
+    
+    Body params (form data):
+        content: Context text content
+    
+    Returns:
+        {"context_id": "username:uuid", "status": "created"}
+    """
+    content = request.form.get("content")
+    
+    if not content or not content.strip():
+        return jsonify({"error": "Content cannot be empty"}), 400
+    
+    conn = get_conn()
+    
+    try:
+        # Create context
+        context = create_user_context(conn, username, content.strip())
+        conn.commit()
+        
+        # Trigger embedding (synchronous for now)
+        embed_user_context(context.id)
+        
+        return jsonify({
+            "context_id": context.id,
+            "status": "created",
+            "username": username
+        })
+    except Exception as e:
+        print(f"[api] create_context ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.get("/contexts/<username>")
+def list_contexts(username: str):
+    """Get all contexts for a user.
+    
+    Returns:
+        {"contexts": [{"id": "...", "content": "...", "created_at": ..., "has_embedding": bool}]}
+    """
+    conn = get_conn()
+    
+    try:
+        contexts = get_user_contexts(conn, username)
+        
+        # Format response (exclude embedding vector, just indicate if exists)
+        formatted = [
+            {
+                "id": ctx.id,
+                "content": ctx.content,
+                "created_at": ctx.created_at,
+                "has_embedding": ctx.embedding is not None
+            }
+            for ctx in contexts
+        ]
+        
+        return jsonify({"contexts": formatted, "username": username})
+    except Exception as e:
+        print(f"[api] list_contexts ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.delete("/contexts/<context_id>")
+def delete_context_endpoint(context_id: str):
+    """Delete a user context.
+    
+    Returns:
+        {"status": "deleted"} or {"error": "not_found"}
+    """
+    conn = get_conn()
+    
+    try:
+        deleted = delete_user_context(conn, context_id)
+        conn.commit()
+        
+        if deleted:
+            return jsonify({"status": "deleted", "context_id": context_id})
+        else:
+            return jsonify({"error": "not_found"}), 404
+    except Exception as e:
+        print(f"[api] delete_context ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.get("/healthz")
