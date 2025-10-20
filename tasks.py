@@ -26,6 +26,8 @@ from db import (
     update_user_embedding,
     update_trending_repo_embedding,
     get_subject_with_embedding,
+    get_user_context,
+    update_context_embedding,
 )
 from embeddings import (
     format_repo_for_embedding,
@@ -1234,8 +1236,18 @@ def embed_user_profile(username: str) -> None:
 
     if not highlighted_names:
         print(
-            f"[task] embed_user_profile: no highlighted repos for username={username}, embedding user only"
+            f"[task] embed_user_profile: no highlighted repos for username={username}, skipping embedding"
         )
+        set_work_status(
+            conn,
+            "embed_user_profile",
+            "user",
+            username,
+            "succeeded",
+            json.dumps({"reason": "no_highlights_skip", "embedding_dim": 0}),
+        )
+        conn.commit()
+        return
 
     # Load full repo subjects for highlighted repos
     highlighted_repos = []
@@ -1336,6 +1348,46 @@ def embed_user_profile(username: str) -> None:
     )
     conn.commit()
     print(f"[task] embed_user_profile done username={username}")
+
+
+def embed_user_context(context_id: str) -> None:
+    """Generate and store embedding for a user context.
+    
+    Args:
+        context_id: ID of the context to embed (format: 'username:uuid')
+    """
+    print(f"[task] embed_user_context start context_id={context_id}")
+    conn = get_conn()
+    
+    # Load context
+    context = get_user_context(conn, context_id)
+    
+    if not context:
+        print(f"[task] embed_user_context FAILED: context not found id={context_id}")
+        return
+    
+    content = context.content.strip()
+    if not content:
+        print(f"[task] embed_user_context FAILED: empty content id={context_id}")
+        return
+    
+    # Generate embedding
+    try:
+        print(f"[task] embed_user_context calling embedding API context_id={context_id}")
+        embedding = get_embedding(content)
+        print(f"[task] embed_user_context received embedding dim={len(embedding)} context_id={context_id}")
+    except Exception as e:
+        print(f"[task] embed_user_context FAILED context_id={context_id} error={e}")
+        return
+    
+    # Store embedding
+    try:
+        update_context_embedding(conn, context_id, embedding)
+        conn.commit()
+        print(f"[task] embed_user_context done context_id={context_id}")
+    except Exception as e:
+        print(f"[task] embed_user_context FAILED to store embedding context_id={context_id} error={e}")
+        return
 
 
 def embed_trending_repos_batch(repo_ids: list[str]) -> None:

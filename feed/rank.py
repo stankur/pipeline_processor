@@ -15,12 +15,12 @@ from db import (
     get_repo_subject,
     get_user_languages,
     get_trending_repos_age_for_languages,
-    get_repos_similarity_to_user,
+    get_repos_similarity_to_user_with_contexts,
     get_all_trending_repos,
-    get_users_similarity_to_user,
+    get_users_similarity_to_user_with_contexts,
     get_hackernews_age,
     get_all_hackernews,
-    get_hackernews_similarity_to_user,
+    get_hackernews_similarity_to_user_with_contexts,
     update_hackernews_embedding,
 )
 from feed.sources import iter_highlight_repo_candidates, iter_trending_repo_candidates, iter_user_candidates, iter_hackernews_candidates
@@ -155,7 +155,7 @@ def _build_feed_embeddings(
     ]
 
     # Compute similarities
-    similarity_scores = get_repos_similarity_to_user(
+    similarity_scores = get_repos_similarity_to_user_with_contexts(
         conn, viewer_username, candidate_repo_ids, subject_type
     )
 
@@ -268,7 +268,7 @@ def build_user_feed(
     candidate_usernames = [username for item_type, username, user_model, ts in candidates]
 
     # Compute similarities
-    similarity_scores = get_users_similarity_to_user(conn, viewer_username, candidate_usernames)
+    similarity_scores = get_users_similarity_to_user_with_contexts(conn, viewer_username, candidate_usernames)
 
     if not similarity_scores:
         print(f"[rank] No similarity scores computed (viewer or candidate embeddings missing)")
@@ -376,8 +376,8 @@ def build_hackernews_feed(
     # Extract story IDs for similarity computation
     candidate_hn_ids = [item_id for item_type, item_id, hn, author, ts in candidates]
     
-    # Compute similarities
-    similarity_scores = get_hackernews_similarity_to_user(
+    # Compute similarities (considering user profile + contexts)
+    similarity_scores = get_hackernews_similarity_to_user_with_contexts(
         conn, viewer_username, candidate_hn_ids
     )
     

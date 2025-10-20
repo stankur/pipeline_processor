@@ -194,3 +194,22 @@ class WorkItem(BaseModel):
     status: str  # "pending" | "running" | "succeeded" | "failed"
     output_json: Optional[str] = None
     processed_at: Optional[float] = None
+
+
+# -------------------- User Context Model --------------------
+
+
+class UserContext(BaseModel):
+    """User-provided context stored in user_contexts table.
+    
+    User contexts allow users to provide additional information about their interests,
+    current projects, or goals that influence their feed recommendations.
+    Each context gets its own embedding and contributes to feed ranking via max similarity.
+    """
+    
+    id: str  # Format: 'username:uuid'
+    user_id: str  # GitHub username
+    content: str  # User-provided text content
+    embedding: Optional[list[float]] = None  # 1024-dim Voyage AI embedding
+    created_at: float  # Unix timestamp
+    updated_at: float  # Unix timestamp
