@@ -405,6 +405,36 @@ def data(username: str):
     return jsonify({"user": user_data, "repos": repos_data})
 
 
+@app.get("/users/<username>/activity")
+def get_activity(username: str):
+    """Get user's daily coding activity (repos and languages touched per day).
+    
+    Returns presence-only data (no commit counts) for building heatmaps.
+    Data covers the last 2 years by default.
+    
+    Returns:
+        - ok: bool
+        - activity: dict with:
+            - version: int (schema version)
+            - window_years: int (time window in years)
+            - days: dict of {date: {repos: [...], languages: [...]}}
+            - repo_days: dict of {repo_id: [dates...]}
+            - language_days: dict of {language: [dates...]}
+        - null if not yet collected
+    """
+    conn = get_conn()
+    row = get_subject(conn, "user_activity", username)
+    
+    activity_data = None
+    if row and row.get("data_json"):
+        try:
+            activity_data = json.loads(row["data_json"])
+        except Exception:
+            activity_data = None
+    
+    return jsonify({"ok": True, "activity": activity_data})
+
+
 @app.get("/users/<username>/progress")
 def progress(username: str):
     """Get work item progress for a user."""

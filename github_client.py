@@ -107,6 +107,10 @@ class GitHubClient:
         """Get detailed repository information including parent for forks."""
         return self.get_json(f"{GITHUB_API}/repos/{owner}/{repo}")
 
+    def get_repo_languages(self, owner: str, repo: str) -> dict:
+        """Return Linguist bytes per language."""
+        return self.get_json(f"{GITHUB_API}/repos/{owner}/{repo}/languages") or {}
+
     def get_rate_limit(self) -> dict:
         """Get current rate limit status."""
         return self.get_json(f"{GITHUB_API}/rate_limit")

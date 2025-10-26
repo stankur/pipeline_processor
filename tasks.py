@@ -5,6 +5,11 @@ import os
 import time
 import json
 from typing import Any, Dict, List, Optional
+import subprocess
+import shutil
+import pathlib
+import tempfile
+from collections import defaultdict
 
 import yaml
 import tiktoken
@@ -76,6 +81,33 @@ def _recent_enough(ts: str | None, years: int = 2) -> bool:
 ACTIVITY_DAYS_THRESHOLD = 4
 RECENT_YEARS = 2
 MAX_BRANCHES_TO_SCAN = 20
+ACTIVITY_WINDOW_YEARS = RECENT_YEARS
+
+UNIMPORTANT_SUFFIXES = {
+    ".md", ".markdown", ".rst", ".adoc", ".txt", ".csv", ".tsv",
+    ".yaml", ".yml", ".toml", ".ini", ".env",
+    ".lock", ".min.js", ".map", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+}
+UNIMPORTANT_FILENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "Cargo.lock",
+    "go.sum", "go.mod", "requirements.txt", "requirements-dev.txt",
+    "Gemfile.lock", "composer.lock", "Podfile.lock",
+}
+UNIMPORTANT_DIR_SEGMENTS = {
+    "node_modules", "vendor", "dist", "build", "out", ".next", ".nuxt", ".git", ".github", "coverage",
+    ".pytest_cache", "__pycache__", ".mypy_cache", ".venv", "env", "venv", ".idea", ".vscode", "target", ".dart_tool",
+}
+
+# Extension-based language detection (simple, no external deps)
+EXT_TO_LANG = {
+    ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript",
+    ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin", ".rb": "Ruby", ".php": "PHP", ".cs": "C#",
+    ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".c": "C", ".h": "C",
+    ".m": "Objective-C", ".mm": "Objective-C++", ".swift": "Swift", ".scala": "Scala",
+    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
+    ".sql": "SQL", ".r": "R", ".R": "R",
+}
 
 
 def _count_author_unique_commit_days(
@@ -115,6 +147,73 @@ def _count_author_unique_commit_days(
             except Exception:
                 continue
     return len(seen_days)
+
+
+def _is_unimportant_path(p: str) -> bool:
+    lp = p.lower()
+    if lp.rsplit("/", 1)[-1] in UNIMPORTANT_FILENAMES:
+        return True
+    if any(seg in UNIMPORTANT_DIR_SEGMENTS for seg in lp.split("/")):
+        return True
+    for sfx in UNIMPORTANT_SUFFIXES:
+        if lp.endswith(sfx):
+            return True
+    return False
+
+
+def _detect_languages_from_extensions(paths: list[str]) -> set[str]:
+    """Detect languages from file extensions."""
+    langs: set[str] = set()
+    for p in paths:
+        ext = os.path.splitext(p.lower())[1]
+        lang = EXT_TO_LANG.get(ext)
+        if lang:
+            langs.add(lang)
+    return langs
+
+
+def _git_clone_shallow(owner: str, name: str, since_date: str) -> pathlib.Path | None:
+    url = f"https://github.com/{owner}/{name}.git"
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"ua-{owner}-{name}-"))
+    try:
+        subprocess.run(
+            ["git", "clone", "--filter=blob:none", "--no-tags", f"--shallow-since={since_date}", url, str(tmp)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+        return tmp
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+
+
+def _git_fetch_shas(repo_dir: pathlib.Path, shas: list[str]) -> None:
+    for i in range(0, len(shas), 64):
+        chunk = shas[i:i+64]
+        try:
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "fetch", "--filter=blob:none", "--no-tags", "--depth=1", "origin", *chunk],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+        except Exception:
+            pass
+
+
+def _git_show_paths_for_sha(repo_dir: pathlib.Path, sha: str) -> list[str]:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(repo_dir), "show", "--name-only", "--pretty=format:", sha],
+            text=True,
+            timeout=10,
+        )
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    except Exception:
+        return []
 
 
 def fetch_profile(username: str) -> None:
@@ -310,6 +409,133 @@ def fetch_repos(username: str) -> None:
     conn.commit()
     print(f"[task] fetch_repos commit username={username}")
     print(f"[task] fetch_repos done username={username} kept={len(kept_subjects)}")
+
+
+def collect_user_daily_activity(username: str) -> None:
+    """Collect per-day repository and language presence for a user.
+    
+    Uses GitHub API to find commits by author across branches (no regex guessing),
+    then clones repos locally to detect languages via file extensions.
+    Stores presence-only JSON (no counts) under subjects('user_activity', username).
+    """
+    print(f"[task] collect_user_daily_activity start user={username}")
+    conn = get_conn()
+    if _already_succeeded(conn, "collect_user_daily_activity", "user", username):
+        return
+    set_work_status(conn, "collect_user_daily_activity", "user", username, "running")
+
+    lookback_days = ACTIVITY_WINDOW_YEARS * 365
+    since_dt = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    since_str = since_dt.date().isoformat()
+
+    client = GitHubClient()
+    rows = get_user_repos(conn, username)
+
+    day_to_repos: dict[str, set[str]] = defaultdict(set)
+    day_to_langs: dict[str, set[str]] = defaultdict(set)
+
+    for r in rows:
+        repo_id = r.get("subject_id") or ""
+        if not repo_id or "/" not in repo_id:
+            continue
+        owner, name = repo_id.split("/", 1)
+
+        # Branches like existing pattern
+        try:
+            branches = client.list_branches(owner, name, per_page=100, limit=MAX_BRANCHES_TO_SCAN)
+        except Exception:
+            branches = []
+
+        # Repo-level allowed languages from Linguist
+        try:
+            lang_bytes = client.get_repo_languages(owner, name) or {}
+        except Exception:
+            lang_bytes = {}
+        allowed_langs = set(lang_bytes.keys())
+
+        sha_to_day: dict[str, str] = {}
+        shas_in_repo: set[str] = set()
+
+        for br in branches:
+            br_name = (br.get("name") or "").strip()
+            if not br_name:
+                continue
+            try:
+                commits = client.list_commits(owner, name, author=username, sha=br_name, per_page=100, limit=100)
+            except Exception:
+                commits = []
+            for c in commits:
+                sha = c.get("sha") or ""
+                if not sha:
+                    continue
+                meta = c.get("commit") or {}
+                date_str = (meta.get("author") or {}).get("date") or (meta.get("committer") or {}).get("date")
+                if not date_str:
+                    continue
+                day = date_str.split("T")[0]
+                sha_to_day[sha] = day
+                shas_in_repo.add(sha)
+                day_to_repos[day].add(repo_id)
+
+        if not shas_in_repo:
+            continue
+
+        repo_dir = _git_clone_shallow(owner, name, since_str)
+        if not repo_dir:
+            continue
+
+        try:
+            _git_fetch_shas(repo_dir, list(shas_in_repo))
+            for sha in shas_in_repo:
+                day = sha_to_day.get(sha)
+                if not day:
+                    continue
+                paths = _git_show_paths_for_sha(repo_dir, sha)
+                if not paths:
+                    continue
+                important_paths = [p for p in paths if not _is_unimportant_path(p)]
+                if not important_paths:
+                    continue
+                langs_detected = _detect_languages_from_extensions(important_paths)
+                if allowed_langs:
+                    langs_detected &= allowed_langs
+                if not langs_detected:
+                    continue
+                day_to_langs[day].update(langs_detected)
+        finally:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+
+    # Build presence JSON
+    days_obj: dict[str, dict] = {}
+    for day in sorted(set(day_to_repos.keys()) | set(day_to_langs.keys())):
+        repos = sorted(day_to_repos.get(day, set()))
+        langs = sorted(day_to_langs.get(day, set()))
+        if repos or langs:
+            days_obj[day] = {"repos": repos, "languages": langs}
+
+    repo_days: dict[str, list[str]] = defaultdict(list)
+    language_days: dict[str, list[str]] = defaultdict(list)
+    for day, obj in days_obj.items():
+        for rid in obj.get("repos", []):
+            repo_days[rid].append(day)
+        for lang in obj.get("languages", []):
+            language_days[lang].append(day)
+    for k in list(repo_days.keys()):
+        repo_days[k] = sorted(repo_days[k])
+    for k in list(language_days.keys()):
+        language_days[k] = sorted(language_days[k])
+
+    result = {
+        "version": 1,
+        "window_years": ACTIVITY_WINDOW_YEARS,
+        "days": days_obj,
+        "repo_days": repo_days,
+        "language_days": language_days,
+    }
+    upsert_subject(conn, "user_activity", username, json.dumps(result, separators=(",", ":")))
+    set_work_status(conn, "collect_user_daily_activity", "user", username, "succeeded")
+    conn.commit()
+    print(f"[task] collect_user_daily_activity done user={username} days={len(days_obj)}")
 
 
 # -------------------- Prompt loading and LLM helpers --------------------

@@ -16,6 +16,7 @@ from assets import (
     extract_repo_keywords_asset,
     extract_repo_kind_asset,
     build_for_you_trending_asset,
+    collect_user_daily_activity_asset,
 )
 
 # All assets in priority order (critical path first, then deferred tasks)
@@ -33,6 +34,7 @@ all_assets = [
     extract_repo_emphasis_asset,
     extract_repo_keywords_asset,
     extract_repo_kind_asset,
+    collect_user_daily_activity_asset,
 ]
 
 defs = Definitions(

@@ -110,6 +110,81 @@ curl http://localhost:8080/users/stankur/progress
 curl http://localhost:8080/users/stankur/data
 ```
 
+### Get daily coding activity
+
+```bash
+curl http://localhost:8080/users/stankur/activity
+```
+
+Get daily coding activity for a user (repos and languages touched per day).
+
+Returns presence-only data (no commit counts) suitable for building GitHub-style contribution heatmaps with language/repo breakdowns.
+
+**Response Schema:**
+
+```json
+{
+	"ok": true,
+	"activity": {
+		"version": 1,
+		"window_years": 2,
+
+		// Per-day activity (chronological index)
+		"days": {
+			"2025-10-26": {
+				"repos": ["owner/repo-a", "owner/repo-b"],
+				"languages": ["Python", "TypeScript"]
+			},
+			"2025-10-25": {
+				"repos": ["owner/repo-a"],
+				"languages": ["Go"]
+			}
+		},
+
+		// Reverse indexes for fast filtering
+		"repo_days": {
+			"owner/repo-a": ["2025-10-25", "2025-10-26"],
+			"owner/repo-b": ["2025-10-26"]
+		},
+		"language_days": {
+			"Python": ["2025-10-26"],
+			"TypeScript": ["2025-10-26"],
+			"Go": ["2025-10-25"]
+		}
+	}
+}
+```
+
+**Fields:**
+
+-   `version` (int): Schema version for future compatibility
+-   `window_years` (int): Time window in years (default: 2)
+-   `days` (object): Date-indexed activity. Each date contains:
+    -   `repos` (array): Repository IDs touched that day
+    -   `languages` (array): Languages used that day
+-   `repo_days` (object): Reverse index mapping repo → array of dates
+-   `language_days` (object): Reverse index mapping language → array of dates
+
+**Returns `null` if:**
+
+-   User hasn't been processed yet
+-   Activity collection task hasn't run
+
+**Use Cases:**
+
+1. **GitHub-style heatmap**: Use `days` to render a calendar grid, color intensity by number of repos/languages
+2. **Filter by repo**: Use `repo_days["owner/repo"]` to get active dates for one project
+3. **Filter by language**: Use `language_days["Python"]` to show Python-only activity
+4. **Toggle view**: Switch between "repos" and "languages" arrays in the same date structure
+
+**Notes:**
+
+-   Only includes commits authored by the user (via GitHub API author filter)
+-   Excludes documentation files (.md, .rst, etc.)
+-   Excludes vendor/generated code (node_modules, lockfiles, etc.)
+-   Languages detected via file extensions, validated against GitHub Linguist data
+-   Data refreshes on user login/restart
+
 ### For You feed
 
 ```bash

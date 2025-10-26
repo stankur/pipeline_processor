@@ -26,6 +26,7 @@ from tasks import (
     extract_repo_emphasis,
     extract_repo_keywords,
     extract_repo_kind,
+    collect_user_daily_activity,
 )
 from feed.rank import build_feed_for_user
 
@@ -245,3 +246,17 @@ def extract_repo_kind_asset(config: UserConfig) -> None:
     )
     for repo_id in repo_ids:
         extract_repo_kind(repo_id)
+
+
+@asset(
+    deps=[fetch_repos_asset, build_for_you_trending_asset],
+    metadata={"work_item_kinds": ["collect_user_daily_activity"], "scope": "user"},
+)
+def collect_user_daily_activity_asset(config: UserConfig) -> None:
+    """Collect per-day repository and language presence (local git, no API rate limits).
+    
+    Dependencies:
+    - fetch_repos_asset: functional (reads repo data from DB)
+    - build_for_you_trending_asset: ordering-only (deferred until critical path completes)
+    """
+    collect_user_daily_activity(config.username)
