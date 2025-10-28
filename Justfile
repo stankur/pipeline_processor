@@ -158,6 +158,11 @@ db-ui:
 db-ui-stop:
     docker rm -f pgweb 2>/dev/null || true
 
+# Collect activity via API (optionally single repo)
+# Usage: just collect-activity user=alice [repo=owner/name] [force=true]
+collect-activity user="stankur" repo="" force="false":
+    @[ -n "$API_KEY" ] && curl -X POST -H "Authorization: Bearer $API_KEY" "http://localhost:8080/users/{{user}}/collect-activity?repo={{repo}}&force={{force}}" | jq || curl -X POST "http://localhost:8080/users/{{user}}/collect-activity?repo={{repo}}&force={{force}}" | jq
+
 # User contexts management
 # Create a user context (for simple short text)
 create-context username content:

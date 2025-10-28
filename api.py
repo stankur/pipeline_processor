@@ -242,6 +242,7 @@ def restart(username: str):
             "select_highlighted_repos",
             "infer_user_theme",
             "embed_user_profile",
+            "collect_user_daily_activity",
         ],
     )
 
@@ -433,6 +434,40 @@ def get_activity(username: str):
             activity_data = None
     
     return jsonify({"ok": True, "activity": activity_data})
+
+
+@app.post("/users/<username>/collect-activity")
+def collect_activity_endpoint(username: str):
+    """Collect user activity for specific repo or all repos.
+    
+    Query params:
+      - repo: optional repo_id (owner/name) - if specified, returns result without DB writes
+      - force: optional boolean to bypass cache (only applies when repo is not specified)
+    
+    Returns the collected activity data.
+    """
+    repo_id = request.args.get("repo")
+    force = request.args.get("force", "").lower() in ("true", "1", "yes")
+    
+    from tasks import collect_user_daily_activity
+    
+    try:
+        result = collect_user_daily_activity(username, repo_id=repo_id, force=force)
+        
+        # If repo_id was specified, result is returned directly (no DB writes)
+        if result:
+            return jsonify({"ok": True, "activity": result})
+        
+        # Otherwise, read from DB (full mode wrote to DB)
+        conn = get_conn()
+        row = get_subject(conn, "user_activity", username)
+        if row and row.get("data_json"):
+            activity_data = json.loads(row["data_json"])
+            return jsonify({"ok": True, "activity": activity_data})
+        
+        return jsonify({"ok": False, "error": "no_activity"}), 404
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.get("/users/<username>/progress")

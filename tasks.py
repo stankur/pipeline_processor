@@ -80,7 +80,7 @@ def _recent_enough(ts: str | None, years: int = 2) -> bool:
 # Activity thresholds and limits
 ACTIVITY_DAYS_THRESHOLD = 4
 RECENT_YEARS = 2
-MAX_BRANCHES_TO_SCAN = 20
+MAX_BRANCHES_TO_SCAN = 10
 ACTIVITY_WINDOW_YEARS = RECENT_YEARS
 
 UNIMPORTANT_SUFFIXES = {
@@ -119,15 +119,33 @@ def _count_author_unique_commit_days(
     short_circuit_at: int = ACTIVITY_DAYS_THRESHOLD,
 ) -> int:
     """Count unique commit days by author across up to N branches, short-circuiting when threshold is met."""
+    # Get default branch name
+    default_branch_name = None
     try:
-        branches = client.list_branches(owner, repo, per_page=100, limit=max_branches)
+        repo_meta = client.get_repo(owner, repo)
+        if repo_meta and repo_meta.get("default_branch"):
+            default_branch_name = repo_meta.get("default_branch")
     except Exception:
-        branches = []
+        pass
+
+    # Build branch names list with default first
+    branch_names = []
+    if default_branch_name:
+        branch_names.append(default_branch_name)
+    
+    try:
+        all_branches = client.list_branches(owner, repo, per_page=100, limit=max_branches)
+        for br in all_branches:
+            name = (br.get("name") or "").strip()
+            if name and name != default_branch_name:
+                branch_names.append(name)
+                if len(branch_names) >= max_branches:
+                    break
+    except Exception:
+        pass
+    
     seen_days: set[str] = set()
-    for br in branches:
-        name = (br.get("name") or "").strip()
-        if not name:
-            continue
+    for name in branch_names:
         try:
             commits = client.list_commits(
                 owner, repo, author=author, sha=name, per_page=100, limit=100
@@ -411,18 +429,33 @@ def fetch_repos(username: str) -> None:
     print(f"[task] fetch_repos done username={username} kept={len(kept_subjects)}")
 
 
-def collect_user_daily_activity(username: str) -> None:
+def collect_user_daily_activity(
+    username: str,
+    repo_id: str | None = None,
+    force: bool = False,
+) -> dict | None:
     """Collect per-day repository and language presence for a user.
     
     Uses GitHub API to find commits by author across branches (no regex guessing),
     then clones repos locally to detect languages via file extensions.
-    Stores presence-only JSON (no counts) under subjects('user_activity', username).
+    
+    If repo_id is specified: computes only that repo, returns result dict, no DB writes.
+    If repo_id is None: computes all repos, writes to DB, returns None.
     """
-    print(f"[task] collect_user_daily_activity start user={username}")
+    print(
+        f"[task] collect_user_daily_activity start user={username} repo_id={repo_id} force={force}"
+    )
     conn = get_conn()
-    if _already_succeeded(conn, "collect_user_daily_activity", "user", username):
-        return
-    set_work_status(conn, "collect_user_daily_activity", "user", username, "running")
+    
+    # Single-repo mode: skip DB writes, return result
+    single_repo_mode = bool(repo_id)
+    
+    if not single_repo_mode:
+        if not force and _already_succeeded(
+            conn, "collect_user_daily_activity", "user", username
+        ):
+            return None
+        set_work_status(conn, "collect_user_daily_activity", "user", username, "running")
 
     lookback_days = ACTIVITY_WINDOW_YEARS * 365
     since_dt = datetime.now(timezone.utc) - timedelta(days=lookback_days)
@@ -430,6 +463,8 @@ def collect_user_daily_activity(username: str) -> None:
 
     client = GitHubClient()
     rows = get_user_repos(conn, username)
+    if repo_id:
+        rows = [r for r in rows if (r.get("subject_id") or "") == repo_id]
 
     day_to_repos: dict[str, set[str]] = defaultdict(set)
     day_to_langs: dict[str, set[str]] = defaultdict(set)
@@ -439,71 +474,123 @@ def collect_user_daily_activity(username: str) -> None:
         if not repo_id or "/" not in repo_id:
             continue
         owner, name = repo_id.split("/", 1)
+        print(f"[task] collect_user_daily_activity processing repo={repo_id}")
 
-        # Branches like existing pattern
+        # Get repo metadata to find default branch
+        default_branch_name = None
         try:
-            branches = client.list_branches(owner, name, per_page=100, limit=MAX_BRANCHES_TO_SCAN)
-        except Exception:
-            branches = []
+            repo_meta = client.get_repo(owner, name)
+            if repo_meta and repo_meta.get("default_branch"):
+                default_branch_name = repo_meta.get("default_branch")
+            print(f"[task] collect_user_daily_activity repo={repo_id} default_branch={default_branch_name}")
+        except Exception as e:
+            print(f"[task] collect_user_daily_activity repo={repo_id} repo_meta_error={e}")
+
+        # Build branch names list with default first
+        branch_names = []
+        if default_branch_name:
+            branch_names.append(default_branch_name)
+        
+        try:
+            all_branches = client.list_branches(owner, name, per_page=100, limit=MAX_BRANCHES_TO_SCAN)
+            for br in all_branches:
+                br_name = (br.get("name") or "").strip()
+                if br_name and br_name != default_branch_name:
+                    branch_names.append(br_name)
+                    if len(branch_names) >= MAX_BRANCHES_TO_SCAN:
+                        break
+            print(f"[task] collect_user_daily_activity repo={repo_id} branch_names={len(branch_names)} (default_first={bool(default_branch_name)})")
+        except Exception as e:
+            print(f"[task] collect_user_daily_activity repo={repo_id} branch_fetch_error={e}")
 
         # Repo-level allowed languages from Linguist
         try:
             lang_bytes = client.get_repo_languages(owner, name) or {}
-        except Exception:
-            lang_bytes = {}
-        allowed_langs = set(lang_bytes.keys())
+            allowed_langs = set(lang_bytes.keys())
+            print(f"[task] collect_user_daily_activity repo={repo_id} allowed_langs={allowed_langs}")
+        except Exception as e:
+            print(f"[task] collect_user_daily_activity repo={repo_id} linguist_error={e}")
+            allowed_langs = set()
 
         sha_to_day: dict[str, str] = {}
         shas_in_repo: set[str] = set()
+        commits_found = 0
+        commits_skipped_no_sha = 0
+        commits_skipped_no_date = 0
 
-        for br in branches:
-            br_name = (br.get("name") or "").strip()
-            if not br_name:
-                continue
+        for br_name in branch_names:
+            print(f"[task] collect_user_daily_activity repo={repo_id} branch={br_name}")
             try:
-                commits = client.list_commits(owner, name, author=username, sha=br_name, per_page=100, limit=100)
-            except Exception:
+                commits = client.list_commits(owner, name, author=username, sha=br_name)
+                commits_found += len(commits)
+                print(f"[task] dound commits {len(commits)}")
+            except Exception as e:
+                print(f"[task] collect_user_daily_activity repo={repo_id} branch={br_name} commit_fetch_error={e}")
                 commits = []
             for c in commits:
                 sha = c.get("sha") or ""
                 if not sha:
+                    commits_skipped_no_sha += 1
                     continue
                 meta = c.get("commit") or {}
                 date_str = (meta.get("author") or {}).get("date") or (meta.get("committer") or {}).get("date")
                 if not date_str:
+                    commits_skipped_no_date += 1
                     continue
                 day = date_str.split("T")[0]
                 sha_to_day[sha] = day
                 shas_in_repo.add(sha)
                 day_to_repos[day].add(repo_id)
 
+        print(f"[task] collect_user_daily_activity repo={repo_id} commits_found={commits_found} unique_shas={len(shas_in_repo)} skipped_no_sha={commits_skipped_no_sha} skipped_no_date={commits_skipped_no_date}")
+
         if not shas_in_repo:
+            print(f"[task] collect_user_daily_activity repo={repo_id} skipping (no commits)")
             continue
 
         repo_dir = _git_clone_shallow(owner, name, since_str)
         if not repo_dir:
+            print(f"[task] collect_user_daily_activity repo={repo_id} clone_failed")
             continue
+
+        shas_processed = 0
+        shas_no_paths = 0
+        shas_all_unimportant = 0
+        shas_no_langs_detected = 0
+        shas_langs_filtered = 0
+        shas_success = 0
 
         try:
             _git_fetch_shas(repo_dir, list(shas_in_repo))
             for sha in shas_in_repo:
+                shas_processed += 1
                 day = sha_to_day.get(sha)
                 if not day:
                     continue
                 paths = _git_show_paths_for_sha(repo_dir, sha)
                 if not paths:
+                    shas_no_paths += 1
                     continue
                 important_paths = [p for p in paths if not _is_unimportant_path(p)]
                 if not important_paths:
+                    shas_all_unimportant += 1
                     continue
                 langs_detected = _detect_languages_from_extensions(important_paths)
-                if allowed_langs:
-                    langs_detected &= allowed_langs
                 if not langs_detected:
+                    shas_no_langs_detected += 1
                     continue
+                if allowed_langs:
+                    before_filter = len(langs_detected)
+                    langs_detected &= allowed_langs
+                    if not langs_detected:
+                        shas_langs_filtered += 1
+                        continue
+                shas_success += 1
                 day_to_langs[day].update(langs_detected)
         finally:
             shutil.rmtree(repo_dir, ignore_errors=True)
+        
+        print(f"[task] collect_user_daily_activity repo={repo_id} shas_processed={shas_processed} success={shas_success} no_paths={shas_no_paths} all_unimportant={shas_all_unimportant} no_langs={shas_no_langs_detected} filtered_by_linguist={shas_langs_filtered}")
 
     # Build presence JSON
     days_obj: dict[str, dict] = {}
@@ -532,10 +619,20 @@ def collect_user_daily_activity(username: str) -> None:
         "repo_days": repo_days,
         "language_days": language_days,
     }
-    upsert_subject(conn, "user_activity", username, json.dumps(result, separators=(",", ":")))
+
+    # Single-repo mode: return result, no DB writes
+    if single_repo_mode:
+        print(f"[task] collect_user_daily_activity done (no-write) user={username} repo={repo_id} days={len(days_obj)}")
+        return result
+
+    # Full mode: write to DB
+    upsert_subject(
+        conn, "user_activity", username, json.dumps(result, separators=(",", ":"))
+    )
     set_work_status(conn, "collect_user_daily_activity", "user", username, "succeeded")
     conn.commit()
     print(f"[task] collect_user_daily_activity done user={username} days={len(days_obj)}")
+    return None
 
 
 # -------------------- Prompt loading and LLM helpers --------------------
@@ -1890,3 +1987,17 @@ def extract_repo_kind(repo_id: str) -> None:
     )
     conn.commit()
     print(f"[task] extract_repo_kind done repo={repo_id} kind_len={len(phrase)}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Collect user daily activity")
+    parser.add_argument("--user", required=True, help="GitHub username")
+    parser.add_argument("--repo", help="Specific repo id owner/name to limit scan")
+    parser.add_argument(
+        "--force", action="store_true", help="Bypass succeeded gate and recompute"
+    )
+    args = parser.parse_args()
+
+    collect_user_daily_activity(args.user, repo_id=(args.repo or None), force=args.force)
